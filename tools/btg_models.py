@@ -98,6 +98,27 @@ def blend_state(m,b):
     alpha=(u32(m,b+0x14)>>24)/255.0 if mode in('alpha','additive') else 1.0
     return (mode,rs.get(14,1)!=0,src,dst,round(alpha,4))
 
+TEXOPS={1:'disable',2:'selectArg1',3:'selectArg2',4:'modulate',5:'modulate2x',6:'modulate4x',7:'add',
+        8:'addSigned',9:'addSigned2x',10:'subtract',11:'addSmooth',12:'blendDiffuseAlpha',13:'blendTextureAlpha'}
+def tex_layers(m,texobj,b):
+    """Animated texture (relocation type 0x07): +0x0C layer count, +0x10 ptr to 0x40-byte layers:
+    ptr texture, f32 scrollU, scrollV (UV units/s), rotate (rad/s), f32[4] tint, f32[3] unknown (wave?).
+    Layer k>0 is combined onto the result by the colour op of texture stage k (batch +0x24 list)."""
+    n,lp=struct.unpack_from('<2I',m,texobj+0xc)
+    if not 0<n<9 or lp+0x40*n>len(m): return None
+    c,p=struct.unpack_from('<2I',m,b+0x24); ops={}
+    if 0<c<64 and p+12*c<=len(m):
+        t=struct.unpack_from('<%dI'%(3*c),m,p)
+        ops={t[i]:t[i+2] for i in range(0,3*c,3) if t[i+1]==1}
+    out=[]
+    for k in range(n):
+        w=struct.unpack_from('<I15f',m,lp+0x40*k)
+        out.append(dict(tex=w[0],op='base' if k==0 else TEXOPS.get(ops.get(k),'modulate'),
+            scroll=[round(w[1],5),round(w[2],5)],rotate=round(w[3],5),tint=[round(x,4) for x in w[4:8]],
+            params=[round(x,5) for x in w[8:11]]))
+    if n==1 and not any(out[0]['scroll']) and not out[0]['rotate']: return None
+    return out
+
 class Pack:
     def __init__(s,main,rel):
         s.m=main; s.O=objects(rel)
@@ -171,14 +192,15 @@ def write_gltf(P,groups,outdir,name,texcache=None):
         if normalized: a['normalized']=True
         if minmax: a['min']=[float(x) for x in arr.min(0)]; a['max']=[float(x) for x in arr.max(0)]
         gl['accessors'].append(a); return len(gl['accessors'])-1
-    def material(tex,bs=None,valpha=False):
+    def material(tex,bs=None,valpha=False,boff=None):
         if bs is not None and bs[0]=='alpha' and bs[4]>=1 and not valpha:
             im_mode=texcache[tex][1] if tex in texcache else None
             if tex not in texcache:
                 im=P.tga(tex) if tex!=0xffffffff else None
                 im_mode='RGBA' if im is not None and im.mode in('RGBA','LA','PA','P') and 'A' in im.getbands() and im.getextrema()[-1][0]<255 else 'RGB'
             if im_mode!='RGBA': bs=None   # blend state set, but nothing is see-through: keep it opaque
-        key=(tex,bs if bs and bs[0]!='opaque' else None)
+        layers=tex_layers(P.m,tex,boff) if boff is not None and P.start.get(tex)==7 else None
+        key=(tex,bs if bs and bs[0]!='opaque' else None,tuple(l['op'] for l in layers) if layers else None)
         if key in texmap: return texmap[key]
         if tex not in texcache:
             im=P.tga(tex) if tex!=0xffffffff else None
@@ -204,6 +226,19 @@ def write_gltf(P,groups,outdir,name,texcache=None):
                 mat['alphaMode']='BLEND'
                 if alpha<1: mat['pbrMetallicRoughness']['baseColorFactor']=[1.0,1.0,1.0,alpha]
             mat['extras']=dict(btg=dict(blend=mode,depthWrite=zw,srcBlend=src,dstBlend=dst))
+        if layers:
+            for l in layers:
+                im=P.tga(l['tex']); l['image']=None
+                if im is not None:
+                    if im.mode not in('RGB','RGBA'): im=im.convert('RGBA')
+                    if im.mode=='RGBA' and im.getextrema()[3][0]==255: im=im.convert('RGB')
+                    import hashlib
+                    fn='tex_%s.png'%hashlib.md5(im.tobytes()+im.mode.encode()+bytes(str(im.size),'ascii')).hexdigest()[:12]
+                    fp=os.path.join(texdir,fn)
+                    if not os.path.exists(fp): im.save(fp)
+                    l['image']='textures/'+fn
+                del l['tex']
+            mat.setdefault('extras',{}).setdefault('btg',{})['layers']=layers
         gl['materials'].append(mat); texmap[key]=len(gl['materials'])-1; return texmap[key]
     stats=dict(nodes=0,tris=0,verts=0,batches=0)
     for nm,bts in groups:
@@ -234,7 +269,7 @@ def write_gltf(P,groups,outdir,name,texcache=None):
             attrs['TEXCOORD_0']=add_acc(np.ascontiguousarray(uv,dtype='<f4'),5126,'VEC2',34962)
             tri=inv.reshape(-1,3)[:,[0,2,1]].astype('<u4')  # flip winding for Z mirror
             ia=add_acc(tri.reshape(-1),5125,'SCALAR',34963)
-            prims.append(dict(attributes=attrs,indices=ia,material=material(bt['tex'],bt.get('bs'),bool(stride==24 and (v[:,15]<255).any()))))
+            prims.append(dict(attributes=attrs,indices=ia,material=material(bt['tex'],bt.get('bs'),bool(stride==24 and (v[:,15]<255).any()),bt['off'])))
             stats['tris']+=len(tri); stats['verts']+=len(pos); stats['batches']+=1
         if not prims: continue
         gl['meshes'].append(dict(name=nm,primitives=prims))

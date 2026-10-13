@@ -33,7 +33,7 @@ Byte-oriented LZ/RLE. Read control byte `c`:
 ### Relocation stream
 u32 list. A value with bit 31 set starts a group (`type = v & 0x7FFFFFFF`), following values are
 offsets in the main block that hold pointers (pointers are offsets into the main block).
-Group types seen: 0x01 texture, 0x07 animated texture, 0x20/0x21/0x22 draw batch,
+Group types seen: 0x01 texture, 0x07 animated (layered, scrolling) texture, 0x20/0x21/0x22 draw batch,
 0x23/0x24 vertex+index buffer, 0x113 RIFF sound, 0x04 animation data, others not decoded.
 
 ## Geometry
@@ -132,5 +132,20 @@ mask. Transparency can also come from vertex colour alpha (stride-24 vertices), 
 Every non-opaque material gets `extras.btg = {blend, depthWrite, srcBlend, dstBlend}` (D3DBLEND values).
 A batch flagged alpha-blend with an opaque texture, no vertex alpha and full opacity is exported opaque.
 
+## Animated textures (relocation type 0x07)
+There are no flipbooks. An animated texture is a stack of texture layers whose UVs scroll and rotate:
+```
++0x00 vtbl  +0x04 u32 w  +0x08 u32 h  +0x0C u32 layerCount (1-4)  +0x10 ptr layers (normally +0x20)
+layer (0x40 bytes): ptr texture, f32 scrollU, f32 scrollV, f32 rotate, f32 tint[4] (always 1),
+                    f32 unknown[3] (almost always 0, 1, 1), zero padding
+```
+Scroll values look like UV units per second and rotate like radians per second (e.g. -0.0349 for a slowly
+turning sky, multiples of pi/18 elsewhere); this reading is inferred from the values, not from engine code.
+The layers are combined like D3D texture stages: stage k's colour op (batch `+0x24` list, type 1) says how
+layer k mixes with the layers before it (seen: ADD, SUBTRACT, BLENDTEXTUREALPHA, MODULATE); a final stage
+modulates with the vertex colour. In the data: 2,325 one-layer, 302 two-layer, 96 three-layer and 20
+four-layer records. glTF export: layer 0 is the base colour texture; every layer, with its image, op, scroll
+and rotate, is listed in `material.extras.btg.layers`.
+
 ## Not decoded yet
-Collision meshes (start of .PCM), animated texture frames past the first.
+Collision meshes (start of .PCM).

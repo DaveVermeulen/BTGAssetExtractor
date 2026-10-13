@@ -141,12 +141,12 @@ errors, so other glTF viewers work too.
 - [x] Rigged characters with skeleton and skin weights (~355), alternate body variants split into separate files
 - [x] Animation clips with bone rotations and translations, including root motion
 - [x] Transparency and blend modes (alpha blend, additive glow, alpha test) on every glTF material
+- [x] Animated textures: every layer exported, with its scroll, rotation and blend op in the material extras
 
 ### To do
 
 - [ ] **Cutscene cameras**: export the animated camera rigs that go with the cutscene clips
 - [ ] **Game text**: UI, help text, objectives and credits in all six languages
-- [ ] **Animated textures**: only the first frame is exported now
 - [ ] **Collision meshes** for each level
 - [ ] **Remaining skinned parts**: about 90 that no skeleton is matched to yet
 - [ ] **Near-duplicate characters**: group variants of the same model
