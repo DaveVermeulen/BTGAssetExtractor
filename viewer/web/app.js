@@ -293,10 +293,79 @@ function frame(camera, object, controls, dir = new THREE.Vector3(1, 0.55, 1.25))
   if (controls) { controls.target.copy(sphere.center); controls.update(); }
   return { box, sphere };
 }
+// ---------------------------------------------------------------- animated texture layers
+// The game has no flipbooks: a material is 1-4 texture layers whose UVs scroll (UV units/s) and
+// rotate (rad/s) around the texture centre, combined like D3D texture stages. The converter lists
+// them in material.extras.btg.layers = [{image, op, scroll: [u, v], rotate}, ...]; layer 0 is the
+// glTF base colour texture. Ops: base, add, modulate, subtract, blendtexturealpha.
+const texTime = { value: 0 };
+const LAYER_OPS = {
+  add: 'c.rgb += t.rgb;',
+  modulate: 'c.rgb *= t.rgb;',
+  subtract: 'c.rgb = max(c.rgb - t.rgb, 0.0);', // which operand comes first is inferred, not confirmed
+  blendtexturealpha: 'c.rgb = mix(c.rgb, t.rgb, t.a);',
+};
+const texLoader = new THREE.TextureLoader();
+function setupLayers(root, baseUrl) {
+  let animated = 0;
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) {
+      const layers = (m.userData.btg || {}).layers;
+      if (!m.map || !Array.isArray(layers) || !layers.length || m.userData._layers) continue;
+      const moving = layers.some((l) => (l.scroll || []).some((x) => x) || l.rotate);
+      if (layers.length < 2 && !moving) continue;
+      animated++;
+      m.userData._layers = true;
+      // The loader shares one Texture between materials; give this one its own wrap settings.
+      m.map = m.map.clone(); m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping; m.map.needsUpdate = true;
+      const n = Math.min(layers.length, 4);
+      const extra = [];
+      for (let k = 1; k < n; k++) {
+        const t = texLoader.load(new URL(layers[k].image, baseUrl).href);
+        t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        extra.push(t);
+      }
+      m.userData._btgTex = extra;
+      const scroll = [0, 1, 2, 3].map((k) => new THREE.Vector2(...((layers[k] || {}).scroll || [0, 0])));
+      const rot = [0, 1, 2, 3].map((k) => +((layers[k] || {}).rotate || 0));
+      const ops = layers.slice(1, n).map((l) => LAYER_OPS[String(l.op).toLowerCase()] || LAYER_OPS.modulate);
+      m.onBeforeCompile = (sh) => {
+        sh.uniforms.btgTime = texTime;
+        sh.uniforms.btgScroll = { value: scroll };
+        sh.uniforms.btgRot = { value: rot };
+        extra.forEach((t, k) => { sh.uniforms['btgMap' + (k + 1)] = { value: t }; });
+        sh.vertexShader = sh.vertexShader
+          .replace('#include <common>', '#include <common>\nvarying vec2 vBtgUv;')
+          .replace('#include <uv_vertex>', '#include <uv_vertex>\nvBtgUv = uv;');
+        sh.fragmentShader = sh.fragmentShader
+          .replace('#include <common>', `#include <common>
+varying vec2 vBtgUv;
+uniform float btgTime; uniform vec2 btgScroll[4]; uniform float btgRot[4];
+${extra.map((_, k) => `uniform sampler2D btgMap${k + 1};`).join('\n')}
+vec2 btgUv(int k) {
+  float a = btgRot[k] * btgTime;
+  vec2 p = mat2(cos(a), sin(a), -sin(a), cos(a)) * (vBtgUv - 0.5);
+  return p + 0.5 + btgScroll[k] * btgTime;
+}`)
+          .replace('#include <map_fragment>', `{
+  vec4 c = texture2D(map, btgUv(0)), t;
+${ops.map((op, k) => `  t = texture2D(btgMap${k + 1}, btgUv(${k + 1})); ${op}`).join('\n')}
+  diffuseColor *= c;
+}`);
+      };
+      m.customProgramCacheKey = () => 'btg' + n + ops.join('');
+      m.needsUpdate = true;
+    }
+  });
+  return animated;
+}
+
 function disposeTree(root) {
   root.traverse((o) => {
     if (o.geometry) o.geometry.dispose();
     for (const m of [].concat(o.material || [])) {
+      for (const t of m.userData._btgTex || []) t.dispose();
       for (const v of Object.values(m)) if (v && v.isTexture) { v.dispose(); v.image?.close?.(); }
       m.dispose();
     }
@@ -380,12 +449,12 @@ const view = (() => {
   const canvas = $('#view3d');
   let renderer = null, scene, camera, controls, clock = new THREE.Clock();
   let current = null, mixer = null, action = null, clips = [], grid = null, skel = null, followBone = null, lastFollow = new THREE.Vector3();
-  const opts = { wire: false, grid: true, skel: false, follow: true, speed: 1, playing: true, transparency: 'file', cam: 'orbit' };
+  const opts = { wire: false, grid: true, skel: false, follow: true, speed: 1, playing: true, transparency: 'file', cam: 'orbit', texanim: true };
   try { if (localStorage.getItem('btgCam') === 'fly') opts.cam = 'fly'; } catch {}
   // Fly camera: WASD to move, Q/E down/up, Shift faster, drag to look, wheel to change speed.
   const fly = { yaw: 0, pitch: 0, keys: new Set(), mult: 1, base: 1, drag: null };
   const FLY_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight']);
-  let token = 0, viewDir = new THREE.Vector3(1, 0.55, 1.25);
+  let token = 0, texLayers = 0, viewDir = new THREE.Vector3(1, 0.55, 1.25);
 
   function init() {
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -432,6 +501,7 @@ const view = (() => {
     if ($('#overlay').hidden || canvas.hidden) return;
     const dt = clock.getDelta();
     if (mixer && opts.playing) mixer.update(dt * opts.speed);
+    if (opts.texanim) texTime.value += dt;
     if (followBone && opts.follow) {
       const p = followBone.getWorldPosition(new THREE.Vector3());
       const d = p.clone().sub(lastFollow); lastFollow.copy(p);
@@ -477,7 +547,7 @@ const view = (() => {
     if (current) { scene.remove(current); disposeTree(current); current = null; }
     if (skel) { scene.remove(skel); skel.dispose(); skel = null; }
     if (grid) { scene.remove(grid); grid.dispose(); grid = null; }
-    mixer = null; action = null; clips = []; followBone = null;
+    mixer = null; action = null; clips = []; followBone = null; texLayers = 0;
   }
   async function show(it) {
     if (!renderer) init();
@@ -490,12 +560,13 @@ const view = (() => {
     if (my !== token) { disposeTree(gltf.scene); return; }
     $('#loading').hidden = true;
     current = gltf.scene; prepare(current, opts.transparency); scene.add(current);
+    texLayers = setupLayers(current, new URL(fileUrl(it.path), location.href));
     const mats = $('#dMaterials'); if (mats) mats.textContent = materialSummary(current);
     clips = gltf.animations;
     if (clips.length) { mixer = new THREE.AnimationMixer(current); playClip(0, false); }
     viewDir = it.folder === 'levels' ? new THREE.Vector3(0.6, 0.9, 0.8) : new THREE.Vector3(1, 0.55, 1.25);
     const { box, sphere } = frame(camera, current, controls, viewDir.clone());
-    fly.base = Math.max(sphere.radius * 0.4, 0.05);
+    fly.base = Math.max(sphere.radius * 0.6, 0.05);
     if (opts.cam === 'fly') setCam('fly');
     const size = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 1.6 || 2;
     grid = new THREE.GridHelper(size, 20, 0x3a4150, 0x262b35); grid.position.set(sphere.center.x, box.min.y, sphere.center.z); grid.visible = opts.grid; scene.add(grid);
@@ -529,7 +600,7 @@ const view = (() => {
   function buildControls(it) {
     const c = $('#dControls');
     const tg = (k, label) => `<button class="toggle ${opts[k] ? 'on' : ''}" data-k="${k}">${label}</button>`;
-    let html = `<div class="row">${tg('wire', 'Wireframe')}${tg('grid', 'Grid')}${skel ? tg('skel', 'Skeleton') : ''}${clips.length ? tg('follow', 'Follow') : ''}<button class="toggle" id="resetView">Reset view</button></div>
+    let html = `<div class="row">${tg('wire', 'Wireframe')}${tg('grid', 'Grid')}${texLayers ? tg('texanim', 'Animate textures') : ''}${skel ? tg('skel', 'Skeleton') : ''}${clips.length ? tg('follow', 'Follow') : ''}<button class="toggle" id="resetView">Reset view</button></div>
       <div><label>Camera</label><div class="row">
         <button class="toggle ${opts.cam === 'orbit' ? 'on' : ''}" data-cam="orbit">Orbit</button>
         <button class="toggle ${opts.cam === 'fly' ? 'on' : ''}" data-cam="fly">Fly (WASD)</button>

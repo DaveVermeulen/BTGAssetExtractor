@@ -110,3 +110,4 @@ dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
 #paneTexView h3 { margin: 0; font-size: 14px; word-break: break-all; }
 #backToModel { align-self: flex-start; }
 .revealMsg { color: var(--muted); font-size: 12px; }
+.hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
