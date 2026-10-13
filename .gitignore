@@ -45,3 +45,6 @@ scratch/
 *.PCA
 *.PCS
 *.pyc
+
+# Local Claude Code project settings (contain machine-specific paths)
+.claude/
