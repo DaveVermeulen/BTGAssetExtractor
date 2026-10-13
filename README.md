@@ -16,7 +16,7 @@ Blender.
 |---|---|
 | `tools/bionicle_extract.py` | ~2,770 textures (PNG), ~680 sounds and music tracks (16-bit WAV), the plain-text config files, and a `manifest.json` |
 | `tools/btg_models.py` | Every level as one glTF in world space (63 levels), plus ~2,650 unique entity meshes (characters, Rahi, masks, props, skydomes) in bind pose |
-| `tools/btg_rigged.py` | ~290 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…) with skeleton, skin weights and animation clips |
+| `tools/btg_rigged.py` | ~290 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…) with skeleton, skin weights and animation clips (rotation, translation and root motion) |
 
 Counts are from the retail PC release; your numbers may differ slightly by version.
 
@@ -117,17 +117,36 @@ output/models/
 The output passes the [Khronos glTF validator](https://github.khronos.org/glTF-Validator/) with no
 errors, so other glTF viewers work too.
 
-## Known gaps
+## Features and roadmap
 
-* Animations carry **bone rotations only**; translations and root motion are not decoded yet.
-* Material **transparency and blend modes** are not applied, so some foliage, glass and effects look opaque.
+### Implemented
+
+- [x] Reading the `.vol` / `.avl` archives and decompressing the BIGB wads inside them
+- [x] Textures to PNG (~2,770), deduplicated across levels
+- [x] Sound effects, music, ambience and cutscene audio to WAV (~680)
+- [x] Plain-text config files from `general.vol` (level list, effects, controller maps)
+- [x] Level geometry in world space, one glTF per level (63 levels)
+- [x] Entity meshes in bind pose (~2,650: characters, Rahi, masks, props, skydomes)
+- [x] Rigged characters with skeleton and skin weights (~290)
+- [x] Animation clips with bone rotations and translations, including root motion
+
+### To do
+
+- [ ] **Cutscene cameras**: export the animated camera rigs that go with the cutscene clips
+- [ ] **Transparency and blend modes**: some foliage, glass, water and effects look opaque.
   In 32-bit palettes the alpha channel is often a gloss mask, not transparency.
-* **Animated textures** export their first frame only.
-* **Collision meshes** and level scripts are not extracted.
-* No video: the retail data has no Bink movies even though the game looks for `Movies\EA_Movie.bik`.
+- [ ] **Game text**: UI, help text, objectives and credits in all six languages
+- [ ] **Animated textures**: only the first frame is exported now
+- [ ] **Collision meshes** for each level
+- [ ] **Remaining skinned parts**: about 90 that no skeleton is matched to yet
+- [ ] **Near-duplicate characters**: group variants of the same model
+- [ ] **Level entity placement**: where each creature, pickup and prop sits in a level
+- [ ] **Level scripts, particles, fog and sky settings**
+
+Not possible: video, because the retail data has no Bink movies even though the game looks for `Movies\EA_Movie.bik`.
 
 Format details, including what is still unknown, are in [docs/FORMAT_NOTES.md](docs/FORMAT_NOTES.md).
-Pull requests that close any of these gaps are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
+Pull requests for anything on the to-do list are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Repository layout
 

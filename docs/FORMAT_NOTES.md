@@ -72,9 +72,28 @@ batch gets weight 1.0 on that bone.
 
 ## Animations (type 0x04)
 A clip points into the name table of the skeleton it drives (the pointer lies in `[u32(h+8), u32(h+4))` of
-the skeleton header). Per bone it stores key times normalised to 0..1 and int16 quaternions in D3DX order;
-x, y, z are scaled by 1/32767 and w by 1/1024 before normalising. Clip length in seconds = 1 / speed field.
-Only rotations are exported.
+the skeleton header). Clip header (all offsets from the clip start, pointers into the main block):
+```
++0x04 ptr name        +0x10 u32 id           +0x18 u32 channelCount   +0x1C ptr channelIds (i32[])
++0x20 u32 keyCount    +0x24 ptr keyTimes (f32[], 0..1)                +0x28 ptr key data start
++0x2C ptr rotKeys (ptr[keyCount])             +0x30 ptr transKeys (ptr[keyCount])
++0x34 f32 speed (clip length in seconds = 1 / speed)                  +0x38, +0x3C f32 0.1 (blend times?)
+```
+* Channel id `c >= 0` drives bone `c` with rotation **and** translation; `c < 0` drives bone `-c-1` with
+  rotation only. So the "-1" channel is bone 0 (`Scene Root`), which is never animated in practice.
+* `rotKeys[k]`: one int16 quaternion per channel in D3DX order x, y, z, w; x, y, z are scaled by 1/32767 and
+  w by 1/1024 before normalising. They are absolute local rotations that replace the bind rotation, not offsets from it.
+* `transKeys[k]`: float x, y, z per channel. Key 0 lists **every** channel; later keys list only the
+  `c >= 0` channels, in channel order. Values are offsets added to the bone's bind translation, in the
+  parent's space; channels without later keys hold their key-0 offset for the whole clip. This carries
+  pelvis bob, prop movement and full root motion (cutscene clips move characters tens of units).
+* Blocks are stored back to back per key: rotations, then translations. All 1,627 clips in the retail
+  data follow this layout exactly.
+* There is no scale channel; the engine's pose blender (`BIONICLE.exe` @ 0x42C3F0) only mixes a
+  quaternion and a translation per bone. The exporter interpolates keys linearly.
+
+The exporter writes a translation track for every bone that any clip of that skeleton moves, in every
+clip (unmoved bones get their bind translation), so switching clips in Blender never leaves a bone offset.
 
 ## Textures inside the wads (used by `bionicle_extract.py`)
 Each texture record in the unpacked main block is `[0x00545C6C][u32 w][u32 h][0][u32 ptr][u32 size]`;
@@ -90,5 +109,5 @@ The codec is Xbox IMA ADPCM (format 0x69): 36 bytes per 64 samples per channel.
 None in the retail data. `BIONICLE.exe` references `Movies\EA_Movie.bik` (Bink), which most copies lack.
 
 ## Not decoded yet
-Animation translations / root motion, a channel id of -1 seen in some clips, collision meshes (start of .PCM),
+Collision meshes (start of .PCM),
 material blend modes and transparency, animated texture frames past the first.

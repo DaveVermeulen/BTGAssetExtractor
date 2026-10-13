@@ -7,7 +7,7 @@ Needs: Python 3.8+, numpy, Pillow. Single-file bundle of btg_rigged.py + rig/*.p
 Reads the .vol archives read-only and writes, for every skinned entity:
   <out>/characters/<name>__<hash>.gltf   mesh + skeleton + per-vertex weights + animation clips
   <out>/characters.csv                   source file, bone/clip/mesh counts per output
-Animations carry bone rotations only (translations / root motion are not decoded yet).
+Animations carry bone rotations and translations, including root motion.
 """
 
 # ==== argz.py ====
@@ -407,6 +407,12 @@ def fit_score(P,node,name,batches,bones):
 
 ANIMVT=0x540ea8
 def find_anims(m,skel_header):
+    """Clip header: +4 name ptr, +0x10 id, +0x18 channel count, +0x1c ptr channel ids,
+    +0x20 key count, +0x24 ptr key times (0..1), +0x2c ptr per-key rotation blocks,
+    +0x30 ptr per-key translation blocks, +0x34 speed (clip length = 1/speed s).
+    Channel id c drives bone c (c>=0, rotation + translation) or bone -c-1 (c<0, rotation only).
+    Rotation block: int16 x,y,z,w per channel. Translation block: float xyz offsets added to the
+    bone's bind translation (parent space); key 0 holds every channel, later keys only c>=0."""
     lo=u32(m,skel_header+8); hi=u32(m,skel_header+4); out=[]
     if not lo<hi<=lo+0x1000: hi=lo+1
     for mm in re.finditer(re.escape(struct.pack('<I',ANIMVT)),m):
@@ -416,30 +422,45 @@ def find_anims(m,skel_header):
         w=struct.unpack_from('<13I',m,o)
         nch,chp,nk,tp,dp,A,B=w[6],w[7],w[8],w[9],w[10],w[11],w[12]
         speed=struct.unpack_from('<f',m,o+0x34)[0]
-        if not(0<nch<512 and 0<nk<100000) or max(chp+4*nch,tp+4*nk,A+4*nk)>len(m): continue
+        if not(0<nch<512 and 0<nk<100000) or max(chp+4*nch,tp+4*nk,A+4*nk,B+4*nk)>len(m): continue
         ch=np.frombuffer(m,dtype='<i4',count=nch,offset=chp)
         t=np.frombuffer(m,dtype='<f4',count=nk,offset=tp).astype(np.float64)
         dur=1.0/speed if speed>0 else 1.0
-        q=np.empty((nk,nch,4))
+        q=np.empty((nk,nch,4)); tr=np.zeros((nk,nch,3))
+        pos=np.nonzero(ch>=0)[0]
         for k in range(nk):
             a=u32(m,A+4*k)
             q[k]=np.frombuffer(m,dtype='<i2',count=nch*4,offset=a).reshape(nch,4)
-        q[:,:,:3]/=32767.0; q[:,:,3]/=1024.0
-        out.append(dict(id=w[4],name=aname,channels=ch,times=t*dur,quats=q,addr=o))
+            b=u32(m,B+4*k); n=nch if k==0 else len(pos)
+            if b+12*n>len(m): break
+            v=np.frombuffer(m,dtype='<f4',count=n*3,offset=b).reshape(n,3)
+            if k==0: tr[:]=v
+            else: tr[k,pos]=v
+        else:
+            q[:,:,:3]/=32767.0; q[:,:,3]/=1024.0
+            out.append(dict(id=w[4],name=aname,channels=ch,times=t*dur,quats=q,trans=tr,addr=o))
     return out
 
 def anim_writer(anims,bones,base_name):
+    def bone_of(v): return v if v>=0 else -v-1
+    def moved(an):
+        return {bone_of(int(v)) for c,v in enumerate(an['channels'])
+                if v>=0 or np.abs(an['trans'][0,c]).max()>1e-6}
+    # bones translated by any clip get a translation track in every clip, so switching clips resets them
+    tbones=sorted(b for an in anims for b in moved(an) if 0<b<len(bones))
+    tbones=sorted(set(tbones))
     def f(gl,add_acc):
         joints=gl['skins'][0]['joints']
         gl['animations']=[]; used=set()
         for an in anims:
-            if len(an['times'])<2 and False: continue
             samplers=[];channels=[]
+            nk=len(an['times'])
             tin=add_acc(np.ascontiguousarray(an['times'],dtype='<f4').reshape(-1,1),5126,'SCALAR',minmax=True)
+            tracks={}
             for c,v in enumerate(an['channels']):
                 v=int(v)
                 if v==-1: continue
-                b=v if v>=0 else -v-1
+                b=bone_of(v)
                 if b<=0 or b>=len(bones): continue
                 q=an['quats'][:,c,:].copy()
                 n=np.linalg.norm(q,axis=1,keepdims=True); n[n==0]=1; q/=n
@@ -449,6 +470,13 @@ def anim_writer(anims,bones,base_name):
                 out=add_acc(q.astype('<f4'),5126,'VEC4')
                 samplers.append(dict(input=tin,output=out,interpolation='LINEAR'))
                 channels.append(dict(sampler=len(samplers)-1,target=dict(node=joints[b],path='rotation')))
+                tracks[b]=an['trans'][:,c,:]
+            for b in tbones:
+                t=np.array(bones[b]['local'][12:15])+tracks.get(b,np.zeros((nk,3)))
+                t=np.broadcast_to(t,(nk,3)).copy(); t[:,2]*=-1   # mirror Z
+                out=add_acc(t.astype('<f4'),5126,'VEC3')
+                samplers.append(dict(input=tin,output=out,interpolation='LINEAR'))
+                channels.append(dict(sampler=len(samplers)-1,target=dict(node=joints[b],path='translation')))
             nm=('anim_'+an['name']) if an['name'] else 'anim_%x'%an['id']
             base_nm=nm; k=2
             while nm in used: nm='%s_v%d'%(base_nm,k); k+=1
@@ -490,7 +518,7 @@ def assign(P,lib):
 def skel_key(s): return tuple((b['name'],b['parent']) for b in s)
 
 def anim_hash(a):
-    return hashlib.md5(a['quats'].tobytes()+a['times'].tobytes()+a['channels'].tobytes()).hexdigest()
+    return hashlib.md5(a['quats'].tobytes()+a['trans'].tobytes()+a['times'].tobytes()+a['channels'].tobytes()).hexdigest()
 
 def run(packs,outdir):
     packs=list(packs)
