@@ -140,12 +140,11 @@ errors, so other glTF viewers work too.
 - [x] Entity meshes in bind pose (~2,650: characters, Rahi, masks, props, skydomes)
 - [x] Rigged characters with skeleton and skin weights (~355), alternate body variants split into separate files
 - [x] Animation clips with bone rotations and translations, including root motion
+- [x] Transparency and blend modes (alpha blend, additive glow, alpha test) on every glTF material
 
 ### To do
 
 - [ ] **Cutscene cameras**: export the animated camera rigs that go with the cutscene clips
-- [ ] **Transparency and blend modes**: some foliage, glass, water and effects look opaque.
-  In 32-bit palettes the alpha channel is often a gloss mask, not transparency.
 - [ ] **Game text**: UI, help text, objectives and credits in all six languages
 - [ ] **Animated textures**: only the first frame is exported now
 - [ ] **Collision meshes** for each level

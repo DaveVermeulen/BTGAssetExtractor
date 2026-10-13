@@ -80,6 +80,24 @@ def decode_tga(m,p):
     if not desc&0x20: rgb=rgb[::-1]
     return Image.fromarray(np.ascontiguousarray(rgb),'RGBA' if rgb.shape[2]==4 else 'RGB')
 
+BLEND_NAMES={(5,6):'alpha',(5,2):'additive'}
+def blend_state(m,b):
+    """Render states of a draw batch: +0x1C count, +0x20 ptr to (D3DRENDERSTATETYPE, value) pairs.
+    27 ALPHABLENDENABLE, 19 SRCBLEND, 20 DESTBLEND, 15 ALPHATESTENABLE, 14 ZWRITEENABLE.
+    Blend factors without an explicit ALPHABLENDENABLE=0 mean blending is on. +0x14 is the
+    material colour (ARGB); its alpha is the batch opacity."""
+    cnt,p=struct.unpack_from('<2I',m,b+0x1c)
+    rs={}
+    if 0<cnt<64 and p+8*cnt<=len(m):
+        v=struct.unpack_from('<%dI'%(2*cnt),m,p); rs=dict(zip(v[0::2],v[1::2]))
+    src,dst=rs.get(19,5),rs.get(20,6)
+    if rs.get(15)==1: mode='cutout'
+    elif rs.get(27)==1 or (rs.get(27)!=0 and (19 in rs or 20 in rs)):
+        mode=BLEND_NAMES.get((src,dst),'alpha' if dst!=2 else 'additive')
+    else: mode='opaque'
+    alpha=(u32(m,b+0x14)>>24)/255.0 if mode in('alpha','additive') else 1.0
+    return (mode,rs.get(14,1)!=0,src,dst,round(alpha,4))
+
 class Pack:
     def __init__(s,main,rel):
         s.m=main; s.O=objects(rel)
@@ -100,7 +118,7 @@ class Pack:
             fvf=u32(m,b+4); vbo=u32(m,b+0xc); tex=u32(m,b+0x10); di=u32(m,b+0x38)
             prim,nv,pc,node=struct.unpack_from('<4I',m,di)
             minidx,startidx=struct.unpack_from('<2I',m,di+0x20)
-            yield dict(off=b,fvf=fvf,vb=vbo,tex=tex,prim=prim,nv=nv,pc=pc,node=node,min=minidx,start=startidx)
+            yield dict(off=b,bs=blend_state(m,b),fvf=fvf,vb=vbo,tex=tex,prim=prim,nv=nv,pc=pc,node=node,min=minidx,start=startidx)
     def vb(s,o):
         m=s.m
         vt,a,stride,vc,vp,ic,ip=struct.unpack_from('<7I',m,o)
@@ -153,8 +171,15 @@ def write_gltf(P,groups,outdir,name,texcache=None):
         if normalized: a['normalized']=True
         if minmax: a['min']=[float(x) for x in arr.min(0)]; a['max']=[float(x) for x in arr.max(0)]
         gl['accessors'].append(a); return len(gl['accessors'])-1
-    def material(tex):
-        if tex in texmap: return texmap[tex]
+    def material(tex,bs=None,valpha=False):
+        if bs is not None and bs[0]=='alpha' and bs[4]>=1 and not valpha:
+            im_mode=texcache[tex][1] if tex in texcache else None
+            if tex not in texcache:
+                im=P.tga(tex) if tex!=0xffffffff else None
+                im_mode='RGBA' if im is not None and im.mode in('RGBA','LA','PA','P') and 'A' in im.getbands() and im.getextrema()[-1][0]<255 else 'RGB'
+            if im_mode!='RGBA': bs=None   # blend state set, but nothing is see-through: keep it opaque
+        key=(tex,bs if bs and bs[0]!='opaque' else None)
+        if key in texmap: return texmap[key]
         if tex not in texcache:
             im=P.tga(tex) if tex!=0xffffffff else None
             fn=None
@@ -171,7 +196,15 @@ def write_gltf(P,groups,outdir,name,texcache=None):
         if fn is not None:
             gl['images'].append(dict(uri='textures/'+fn)); gl['textures'].append(dict(source=len(gl['images'])-1,sampler=0))
             mat['pbrMetallicRoughness']['baseColorTexture']=dict(index=len(gl['textures'])-1)
-        gl['materials'].append(mat); texmap[tex]=len(gl['materials'])-1; return texmap[tex]
+        if bs is not None and bs[0]!='opaque':
+            mode,zw,src,dst,alpha=bs
+            mat['name']+='_'+mode
+            if mode=='cutout': mat['alphaMode']='MASK'; mat['alphaCutoff']=0.5
+            else:
+                mat['alphaMode']='BLEND'
+                if alpha<1: mat['pbrMetallicRoughness']['baseColorFactor']=[1.0,1.0,1.0,alpha]
+            mat['extras']=dict(btg=dict(blend=mode,depthWrite=zw,srcBlend=src,dstBlend=dst))
+        gl['materials'].append(mat); texmap[key]=len(gl['materials'])-1; return texmap[key]
     stats=dict(nodes=0,tris=0,verts=0,batches=0)
     for nm,bts in groups:
         prims=[]
@@ -201,7 +234,7 @@ def write_gltf(P,groups,outdir,name,texcache=None):
             attrs['TEXCOORD_0']=add_acc(np.ascontiguousarray(uv,dtype='<f4'),5126,'VEC2',34962)
             tri=inv.reshape(-1,3)[:,[0,2,1]].astype('<u4')  # flip winding for Z mirror
             ia=add_acc(tri.reshape(-1),5125,'SCALAR',34963)
-            prims.append(dict(attributes=attrs,indices=ia,material=material(bt['tex'])))
+            prims.append(dict(attributes=attrs,indices=ia,material=material(bt['tex'],bt.get('bs'),bool(stride==24 and (v[:,15]<255).any()))))
             stats['tris']+=len(tri); stats['verts']+=len(pos); stats['batches']+=1
         if not prims: continue
         gl['meshes'].append(dict(name=nm,primitives=prims))

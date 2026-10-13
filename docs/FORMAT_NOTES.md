@@ -108,6 +108,29 @@ The codec is Xbox IMA ADPCM (format 0x69): 36 bytes per 64 samples per channel.
 ## Video
 None in the retail data. `BIONICLE.exe` references `Movies\EA_Movie.bik` (Bink), which most copies lack.
 
+## Materials: transparency and blend modes
+Each draw batch carries its D3D state as three lists:
+```
++0x14 u32 material colour (ARGB; alpha = batch opacity)   +0x18 u32 (byte repeated 4x, unknown)
++0x1C u32 count, +0x20 ptr  (D3DRENDERSTATETYPE, value) pairs
++0x24 u32 count, +0x28 ptr  (stage, D3DTEXTURESTAGESTATETYPE, value) triples
++0x2C u32 count, +0x30 ptr  (stage, D3DSAMPLERSTATETYPE, value) triples (address U/V: wrap or clamp)
+```
+Render states seen: 14 ZWRITEENABLE, 15 ALPHATESTENABLE, 19 SRCBLEND, 20 DESTBLEND, 22 CULLMODE,
+27 ALPHABLENDENABLE, 171 BLENDOP. Combinations:
+
+| States | Meaning | glTF export |
+|---|---|---|
+| none, or 27=0 | opaque | `OPAQUE` |
+| 27=1, or 19/20 without 27=0, with SRCALPHA / INVSRCALPHA (5/6) | alpha blend | `BLEND` |
+| same with SRCALPHA / ONE (5/2), usually with z-write off | additive (glows, fire, sparks) | `BLEND` + `extras.btg.blend = "additive"` |
+| 15=1 | alpha test | `MASK`, cutoff 0.5 |
+
+Most level batches (types 0x20) have an empty list and are opaque. Entity batches (0x21, 0x22) list the
+full state. Texture alpha only counts when blending or alpha test is on; on opaque batches it is a gloss
+mask. Transparency can also come from vertex colour alpha (stride-24 vertices), which glTF multiplies in.
+Every non-opaque material gets `extras.btg = {blend, depthWrite, srcBlend, dstBlend}` (D3DBLEND values).
+A batch flagged alpha-blend with an opaque texture, no vertex alpha and full opacity is exported opaque.
+
 ## Not decoded yet
-Collision meshes (start of .PCM),
-material blend modes and transparency, animated texture frames past the first.
+Collision meshes (start of .PCM), animated texture frames past the first.
