@@ -212,16 +212,30 @@ function addLights(scene) {
   const d = new THREE.DirectionalLight(0xffffff, 2.0); d.position.set(3, 5, 4); scene.add(d);
 }
 // Transparency and blend modes. The glTF alphaMode (OPAQUE / MASK / BLEND) is standard and the
-// loader applies it; game blend modes that glTF has no word for come in material.extras.btg_blend
-// ("additive", "subtractive", "multiply", "alpha", "opaque"), which three.js puts in userData.
+// loader applies it. The converter adds the game's own blend state in material.extras.btg
+// ({blend: "opaque"|"alpha"|"additive"|"cutout", depthWrite, srcBlend, dstBlend} with D3DBLEND
+// factor numbers), which three.js puts in userData. Texture alpha on OPAQUE materials is a gloss
+// mask, not transparency, so it is ignored unless the viewer is asked to treat it as a cutout.
 const BLENDS = {
   additive: { blending: THREE.AdditiveBlending },
   subtractive: { blending: THREE.CustomBlending, blendEquation: THREE.ReverseSubtractEquation, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneFactor },
   multiply: { blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.DstColorFactor, blendDst: THREE.ZeroFactor },
   alpha: { blending: THREE.NormalBlending },
 };
+// D3DBLEND -> three.js blend factor
+const D3D = { 1: THREE.ZeroFactor, 2: THREE.OneFactor, 3: THREE.SrcColorFactor, 4: THREE.OneMinusSrcColorFactor,
+  5: THREE.SrcAlphaFactor, 6: THREE.OneMinusSrcAlphaFactor, 7: THREE.DstAlphaFactor, 8: THREE.OneMinusDstAlphaFactor,
+  9: THREE.DstColorFactor, 10: THREE.OneMinusDstColorFactor, 11: THREE.SrcAlphaSaturateFactor };
+function btgOf(m) { return m.userData.btg || {}; }
+function blendState(m, kind) {
+  const b = btgOf(m);
+  if (D3D[b.srcBlend] !== undefined && D3D[b.dstBlend] !== undefined)
+    return { blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: D3D[b.srcBlend], blendDst: D3D[b.dstBlend] };
+  return BLENDS[kind];
+}
 function blendKind(m) {
-  const b = String(m.userData.btg_blend || '').toLowerCase();
+  const b = String(btgOf(m).blend || m.userData.btg_blend || '').toLowerCase();
+  if (b === 'cutout') return 'cutout';
   if (BLENDS[b]) return b;
   if (b === 'opaque') return 'opaque';
   if (m.transparent) return 'alpha';
@@ -238,11 +252,12 @@ function applyTransparency(root, mode = 'file') {
       Object.assign(m, { transparent: false, alphaTest: 0, depthWrite: true, blending: THREE.NormalBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor });
       if (mode === 'cutout') {
         if (m.map) m.alphaTest = 0.5;
-        if (BLENDS[orig.kind] && orig.kind !== 'alpha') Object.assign(m, BLENDS[orig.kind], { transparent: true, depthWrite: false });
+        if (BLENDS[orig.kind] && orig.kind !== 'alpha') Object.assign(m, blendState(m, orig.kind), { transparent: true, depthWrite: false });
       } else if (mode === 'file') {
-        if (orig.kind === 'cutout') m.alphaTest = orig.alphaTest;
-        else if (BLENDS[orig.kind]) Object.assign(m, BLENDS[orig.kind], { transparent: true, depthWrite: false });
-        if (typeof m.userData.btg_depth_write === 'boolean') m.depthWrite = m.userData.btg_depth_write;
+        if (orig.kind === 'cutout') m.alphaTest = orig.alphaTest || 0.5;
+        else if (BLENDS[orig.kind]) Object.assign(m, blendState(m, orig.kind), { transparent: true, depthWrite: false });
+        const dw = typeof btgOf(m).depthWrite === 'boolean' ? btgOf(m).depthWrite : m.userData.btg_depth_write;
+        if (typeof dw === 'boolean' && orig.kind !== 'opaque') m.depthWrite = dw;
       }
       m.needsUpdate = true;
     }
