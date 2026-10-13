@@ -64,7 +64,7 @@ function detail(it) {
 function readHash() {
   const h = new URLSearchParams(location.hash.slice(1));
   if (TABS[h.get('tab')]) state.tab = h.get('tab');
-  state.q = h.get('q') || ''; state.level = h.get('level') || ''; state.chip = h.get('f') || 'all'; state.sort = h.get('sort') || 'name';
+  state.q = h.get('q') || ''; state.level = state.pickedLevel = h.get('level') || ''; state.chip = h.get('f') || 'all'; state.sort = h.get('sort') || 'name';
 }
 function writeHash() {
   const h = new URLSearchParams({ tab: state.tab });
@@ -76,7 +76,8 @@ function writeHash() {
 function buildToolbar() {
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
   const levels = [...new Set(DATA[state.tab].map((i) => i.level).filter(Boolean))].sort((a, b) => levelKey(a) - levelKey(b) || a.localeCompare(b));
-  if (state.level && !levels.includes(state.level)) state.level = '';
+  // Keep the level the user picked across tabs; show all levels only where it doesn't exist.
+  state.level = levels.includes(state.pickedLevel) ? state.pickedLevel : '';
   $('#level').innerHTML = `<option value="">All levels</option>` + levels.map((l) => `<option value="${esc(l)}">${esc(levelLabel(l))}</option>`).join('');
   $('#level').value = state.level;
   const chips = TABS[state.tab].chips;
@@ -379,7 +380,11 @@ const view = (() => {
   const canvas = $('#view3d');
   let renderer = null, scene, camera, controls, clock = new THREE.Clock();
   let current = null, mixer = null, action = null, clips = [], grid = null, skel = null, followBone = null, lastFollow = new THREE.Vector3();
-  const opts = { wire: false, grid: true, skel: false, follow: true, speed: 1, playing: true, transparency: 'file' };
+  const opts = { wire: false, grid: true, skel: false, follow: true, speed: 1, playing: true, transparency: 'file', cam: 'orbit' };
+  try { if (localStorage.getItem('btgCam') === 'fly') opts.cam = 'fly'; } catch {}
+  // Fly camera: WASD to move, Q/E down/up, Shift faster, drag to look, wheel to change speed.
+  const fly = { yaw: 0, pitch: 0, keys: new Set(), mult: 1, base: 1, drag: null };
+  const FLY_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight']);
   let token = 0, viewDir = new THREE.Vector3(1, 0.55, 1.25);
 
   function init() {
@@ -390,6 +395,33 @@ const view = (() => {
     camera = new THREE.PerspectiveCamera(40, 1, 0.01, 1000);
     controls = new OrbitControls(camera, canvas); controls.enableDamping = true;
     new ResizeObserver(resize).observe(canvas);
+    camera.rotation.order = 'YXZ';
+    canvas.addEventListener('contextmenu', (e) => { if (opts.cam === 'fly') e.preventDefault(); });
+    canvas.addEventListener('pointerdown', (e) => {
+      if (opts.cam !== 'fly') return;
+      fly.drag = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId);
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (opts.cam !== 'fly' || !fly.drag) return;
+      fly.yaw -= (e.clientX - fly.drag.x) * 0.004; fly.pitch -= (e.clientY - fly.drag.y) * 0.004;
+      fly.pitch = Math.max(-1.55, Math.min(1.55, fly.pitch));
+      fly.drag = { x: e.clientX, y: e.clientY };
+    });
+    canvas.addEventListener('pointerup', () => { fly.drag = null; });
+    canvas.addEventListener('wheel', (e) => {
+      if (opts.cam !== 'fly') return;
+      e.preventDefault();
+      fly.mult = Math.max(0.05, Math.min(50, fly.mult * (e.deltaY < 0 ? 1.25 : 0.8)));
+      const l = $('#flySpeed'); if (l) l.textContent = '×' + fly.mult.toFixed(2);
+    }, { passive: false });
+    addEventListener('keydown', (e) => {
+      if (opts.cam !== 'fly' || $('#overlay').hidden || canvas.hidden || !FLY_KEYS.has(e.code)) return;
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) && e.target.type !== 'range') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      fly.keys.add(e.code); e.preventDefault();
+    });
+    addEventListener('keyup', (e) => fly.keys.delete(e.code));
+    addEventListener('blur', () => fly.keys.clear());
     renderer.setAnimationLoop(loop);
   }
   function resize() {
@@ -405,13 +437,41 @@ const view = (() => {
       const d = p.clone().sub(lastFollow); lastFollow.copy(p);
       camera.position.add(d); controls.target.add(d);
     }
+    if (opts.cam === 'fly') {
+      const k = fly.keys, v = new THREE.Vector3();
+      const fwd = new THREE.Vector3(-Math.sin(fly.yaw) * Math.cos(fly.pitch), Math.sin(fly.pitch), -Math.cos(fly.yaw) * Math.cos(fly.pitch));
+      const right = new THREE.Vector3(Math.cos(fly.yaw), 0, -Math.sin(fly.yaw));
+      if (k.has('KeyW')) v.add(fwd); if (k.has('KeyS')) v.sub(fwd);
+      if (k.has('KeyD')) v.add(right); if (k.has('KeyA')) v.sub(right);
+      if (k.has('KeyE')) v.y += 1; if (k.has('KeyQ')) v.y -= 1;
+      if (v.lengthSq()) {
+        const fast = k.has('ShiftLeft') || k.has('ShiftRight') ? 4 : 1;
+        camera.position.addScaledVector(v.normalize(), fly.base * fly.mult * fast * Math.min(dt, 0.1));
+      }
+      camera.rotation.set(fly.pitch, fly.yaw, 0);
+    }
     if (action) {
       const t = action.time, dur = action.getClip().duration || 0;
       const tl = $('#timeline'); if (tl && !tl._drag) tl.value = dur ? t / dur : 0;
       const lab = $('#timeLabel'); if (lab) lab.textContent = `${fmtTime(t)} / ${fmtTime(dur)}`;
     }
-    controls.update();
+    if (opts.cam === 'orbit') controls.update();
     renderer.render(scene, camera);
+  }
+  // Point the fly camera the way the orbit camera was looking, and back.
+  function setCam(mode) {
+    opts.cam = mode;
+    try { localStorage.setItem('btgCam', mode); } catch {}
+    if (mode === 'fly') {
+      const d = controls.target.clone().sub(camera.position).normalize();
+      fly.yaw = Math.atan2(-d.x, -d.z); fly.pitch = Math.asin(Math.max(-1, Math.min(1, d.y)));
+      controls.enabled = false;
+    } else {
+      const dir = camera.getWorldDirection(new THREE.Vector3());
+      controls.target.copy(camera.position).addScaledVector(dir, fly.base * 2);
+      controls.enabled = true; controls.update();
+    }
+    fly.keys.clear();
   }
   function clear() {
     if (current) { scene.remove(current); disposeTree(current); current = null; }
@@ -435,6 +495,8 @@ const view = (() => {
     if (clips.length) { mixer = new THREE.AnimationMixer(current); playClip(0, false); }
     viewDir = it.folder === 'levels' ? new THREE.Vector3(0.6, 0.9, 0.8) : new THREE.Vector3(1, 0.55, 1.25);
     const { box, sphere } = frame(camera, current, controls, viewDir.clone());
+    fly.base = Math.max(sphere.radius * 0.4, 0.05);
+    if (opts.cam === 'fly') setCam('fly');
     const size = Math.max(box.max.x - box.min.x, box.max.z - box.min.z) * 1.6 || 2;
     grid = new THREE.GridHelper(size, 20, 0x3a4150, 0x262b35); grid.position.set(sphere.center.x, box.min.y, sphere.center.z); grid.visible = opts.grid; scene.add(grid);
     if (!followBone) current.traverse((o) => { if (!followBone && o.isBone) followBone = o; });
@@ -455,8 +517,10 @@ const view = (() => {
   // Frame the model as it is posed right now, keeping the current viewing direction.
   function reset() {
     if (!current) return;
-    const dir = camera.position.clone().sub(controls.target);
-    const { box, sphere } = frame(camera, current, controls, dir.lengthSq() ? dir : viewDir.clone());
+    if (opts.cam === 'fly') controls.target.copy(camera.position).addScaledVector(camera.getWorldDirection(new THREE.Vector3()), 1);
+    const dir2 = camera.position.clone().sub(controls.target);
+    const { box, sphere } = frame(camera, current, controls, dir2.lengthSq() ? dir2 : viewDir.clone());
+    if (opts.cam === 'fly') setCam('fly');
     if (grid) grid.position.set(sphere.center.x, box.min.y, sphere.center.z);
     if (followBone) lastFollow.copy(followBone.getWorldPosition(new THREE.Vector3()));
   }
@@ -466,6 +530,12 @@ const view = (() => {
     const c = $('#dControls');
     const tg = (k, label) => `<button class="toggle ${opts[k] ? 'on' : ''}" data-k="${k}">${label}</button>`;
     let html = `<div class="row">${tg('wire', 'Wireframe')}${tg('grid', 'Grid')}${skel ? tg('skel', 'Skeleton') : ''}${clips.length ? tg('follow', 'Follow') : ''}<button class="toggle" id="resetView">Reset view</button></div>
+      <div><label>Camera</label><div class="row">
+        <button class="toggle ${opts.cam === 'orbit' ? 'on' : ''}" data-cam="orbit">Orbit</button>
+        <button class="toggle ${opts.cam === 'fly' ? 'on' : ''}" data-cam="fly">Fly (WASD)</button>
+        <span id="flyInfo" class="hint" ${opts.cam === 'fly' ? '' : 'hidden'}>Speed <b id="flySpeed">×${fly.mult.toFixed(2)}</b></span></div>
+        <p class="hint" id="flyHelp" ${opts.cam === 'fly' ? '' : 'hidden'}>W A S D move · Q / E down / up · hold Shift to go faster · drag to look around · mouse wheel changes speed</p>
+      </div>
       <div><label>Transparency</label><select id="transSel">
         <option value="file">As stored in the file</option><option value="cutout">Texture alpha as cutout</option><option value="off">Off (all opaque)</option>
       </select></div>`;
@@ -483,6 +553,12 @@ const view = (() => {
       if (k === 'follow' && followBone) lastFollow.copy(followBone.getWorldPosition(new THREE.Vector3()));
     });
     $('#resetView').onclick = reset;
+    c.querySelectorAll('[data-cam]').forEach((b) => b.onclick = () => {
+      setCam(b.dataset.cam);
+      c.querySelectorAll('[data-cam]').forEach((x) => x.classList.toggle('on', x.dataset.cam === opts.cam));
+      $('#flyInfo').hidden = $('#flyHelp').hidden = opts.cam !== 'fly';
+      b.blur(); // keep keyboard focus off the button so WASD and Space go to the view
+    });
     $('#transSel').value = opts.transparency;
     $('#transSel').onchange = (e) => { opts.transparency = e.target.value; applyTransparency(current, opts.transparency); };
     if (clips.length) {
@@ -607,10 +683,10 @@ function step(d) {
 }
 
 // ---------------------------------------------------------------- events
-$('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; state.tab = b.dataset.tab; state.level = ''; state.chip = 'all'; refresh(); });
+$('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; state.tab = b.dataset.tab; state.chip = 'all'; refresh(); });
 let searchTimer;
 $('#search').addEventListener('input', (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value; refresh(); }, 150); });
-$('#level').addEventListener('change', (e) => { state.level = e.target.value; refresh(); });
+$('#level').addEventListener('change', (e) => { state.level = state.pickedLevel = e.target.value; refresh(); });
 $('#sort').addEventListener('change', (e) => { state.sort = e.target.value; refresh(); });
 $('#chips').addEventListener('click', (e) => { const b = e.target.closest('.chip'); if (!b) return; state.chip = b.dataset.chip; refresh(); });
 $('#cardSize').addEventListener('input', (e) => { document.documentElement.style.setProperty('--card', e.target.value + 'px'); try { localStorage.setItem('btgCard', e.target.value); } catch {} });
