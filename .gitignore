@@ -1,0 +1,21 @@
+﻿# Never commit game data or extracted assets (copyrighted, large)
+output/
+scratch/
+*.vol
+*.avl
+*.PCM
+*.PCA
+*.PCS
+*.bik
+*.exe
+*.dll
+
+# Python / editor noise
+__pycache__/
+*.pyc
+.venv/
+.vscode/
+.idea/
+
+# Local Claude settings
+.claude/settings.local.json
