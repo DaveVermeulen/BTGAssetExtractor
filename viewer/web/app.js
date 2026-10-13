@@ -211,13 +211,57 @@ function addLights(scene) {
   scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 2.2));
   const d = new THREE.DirectionalLight(0xffffff, 2.0); d.position.set(3, 5, 4); scene.add(d);
 }
-function prepare(root) {
+// Transparency and blend modes. The glTF alphaMode (OPAQUE / MASK / BLEND) is standard and the
+// loader applies it; game blend modes that glTF has no word for come in material.extras.btg_blend
+// ("additive", "subtractive", "multiply", "alpha", "opaque"), which three.js puts in userData.
+const BLENDS = {
+  additive: { blending: THREE.AdditiveBlending },
+  subtractive: { blending: THREE.CustomBlending, blendEquation: THREE.ReverseSubtractEquation, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneFactor },
+  multiply: { blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.DstColorFactor, blendDst: THREE.ZeroFactor },
+  alpha: { blending: THREE.NormalBlending },
+};
+function blendKind(m) {
+  const b = String(m.userData.btg_blend || '').toLowerCase();
+  if (BLENDS[b]) return b;
+  if (b === 'opaque') return 'opaque';
+  if (m.transparent) return 'alpha';
+  if (m.alphaTest > 0) return 'cutout';
+  return 'opaque';
+}
+// mode: 'file' (as the glTF says), 'off' (everything opaque) or 'cutout' (use texture alpha as a cutout everywhere)
+function applyTransparency(root, mode = 'file') {
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) {
+      if (!m.userData._orig) m.userData._orig = { transparent: m.transparent, alphaTest: m.alphaTest, depthWrite: m.depthWrite, kind: blendKind(m) };
+      const orig = m.userData._orig;
+      Object.assign(m, { transparent: false, alphaTest: 0, depthWrite: true, blending: THREE.NormalBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor });
+      if (mode === 'cutout') {
+        if (m.map) m.alphaTest = 0.5;
+        if (BLENDS[orig.kind] && orig.kind !== 'alpha') Object.assign(m, BLENDS[orig.kind], { transparent: true, depthWrite: false });
+      } else if (mode === 'file') {
+        if (orig.kind === 'cutout') m.alphaTest = orig.alphaTest;
+        else if (BLENDS[orig.kind]) Object.assign(m, BLENDS[orig.kind], { transparent: true, depthWrite: false });
+        if (typeof m.userData.btg_depth_write === 'boolean') m.depthWrite = m.userData.btg_depth_write;
+      }
+      m.needsUpdate = true;
+    }
+  });
+}
+function materialSummary(root) {
+  const seen = new Set(), n = {};
+  root.traverse((o) => { if (o.isMesh) for (const m of [].concat(o.material)) if (!seen.has(m)) { seen.add(m); const k = m.userData._orig?.kind || blendKind(m); n[k] = (n[k] || 0) + 1; } });
+  const order = ['opaque', 'cutout', 'alpha', 'additive', 'subtractive', 'multiply'];
+  return `${seen.size}` + (Object.keys(n).some((k) => k !== 'opaque') ? ' (' + order.filter((k) => n[k]).map((k) => `${n[k]} ${k}`).join(', ') + ')' : '');
+}
+function prepare(root, transparency) {
   root.traverse((o) => {
     if (o.isMesh) {
       o.frustumCulled = false;
       for (const m of [].concat(o.material)) { m.side = THREE.DoubleSide; }
     }
   });
+  applyTransparency(root, transparency);
 }
 function frame(camera, object, controls, dir = new THREE.Vector3(1, 0.55, 1.25)) {
   object.updateMatrixWorld(true);
@@ -320,7 +364,7 @@ const view = (() => {
   const canvas = $('#view3d');
   let renderer = null, scene, camera, controls, clock = new THREE.Clock();
   let current = null, mixer = null, action = null, clips = [], grid = null, skel = null, followBone = null, lastFollow = new THREE.Vector3();
-  const opts = { wire: false, grid: true, skel: false, follow: true, speed: 1, playing: true };
+  const opts = { wire: false, grid: true, skel: false, follow: true, speed: 1, playing: true, transparency: 'file' };
   let token = 0, viewDir = new THREE.Vector3(1, 0.55, 1.25);
 
   function init() {
@@ -370,7 +414,8 @@ const view = (() => {
     catch (e) { if (my === token) $('#loading').textContent = 'Could not load this model: ' + e.message; return; }
     if (my !== token) { disposeTree(gltf.scene); return; }
     $('#loading').hidden = true;
-    current = gltf.scene; prepare(current); scene.add(current);
+    current = gltf.scene; prepare(current, opts.transparency); scene.add(current);
+    const mats = $('#dMaterials'); if (mats) mats.textContent = materialSummary(current);
     clips = gltf.animations;
     if (clips.length) { mixer = new THREE.AnimationMixer(current); playClip(0, false); }
     viewDir = it.folder === 'levels' ? new THREE.Vector3(0.6, 0.9, 0.8) : new THREE.Vector3(1, 0.55, 1.25);
@@ -405,7 +450,10 @@ const view = (() => {
   function buildControls(it) {
     const c = $('#dControls');
     const tg = (k, label) => `<button class="toggle ${opts[k] ? 'on' : ''}" data-k="${k}">${label}</button>`;
-    let html = `<div class="row">${tg('wire', 'Wireframe')}${tg('grid', 'Grid')}${skel ? tg('skel', 'Skeleton') : ''}${clips.length ? tg('follow', 'Follow') : ''}<button class="toggle" id="resetView">Reset view</button></div>`;
+    let html = `<div class="row">${tg('wire', 'Wireframe')}${tg('grid', 'Grid')}${skel ? tg('skel', 'Skeleton') : ''}${clips.length ? tg('follow', 'Follow') : ''}<button class="toggle" id="resetView">Reset view</button></div>
+      <div><label>Transparency</label><select id="transSel">
+        <option value="file">As stored in the file</option><option value="cutout">Texture alpha as cutout</option><option value="off">Off (all opaque)</option>
+      </select></div>`;
     if (clips.length) {
       html += `<div><label>Animation (${clips.length})</label><select id="clipSel">${clips.map((a, i) => `<option value="${i}">${esc(a.name || 'clip ' + i)} (${a.duration.toFixed(1)}s)</option>`).join('')}</select></div>
       <div class="row"><button class="toggle" id="playBtn">${opts.playing ? 'Pause' : 'Play'}</button>
@@ -420,6 +468,8 @@ const view = (() => {
       if (k === 'follow' && followBone) lastFollow.copy(followBone.getWorldPosition(new THREE.Vector3()));
     });
     $('#resetView').onclick = reset;
+    $('#transSel').value = opts.transparency;
+    $('#transSel').onchange = (e) => { opts.transparency = e.target.value; applyTransparency(current, opts.transparency); };
     if (clips.length) {
       $('#clipSel').onchange = (e) => playClip(+e.target.value);
       $('#playBtn').onclick = (e) => { opts.playing = !opts.playing; e.target.textContent = opts.playing ? 'Pause' : 'Play'; };
@@ -446,7 +496,7 @@ function openDetail(i) {
   if (isModel) {
     add('Level', levelLabel(it.level)); add('Group', it.folder); add('Triangles', fmtNum(it.tris)); add('Vertices', fmtNum(it.verts));
     if (it.bones) add('Bones', it.bones); if (it.clips.length) add('Clips', it.clips.length);
-    add('Textures', it.textures); add('Size', fmtSize(it.size)); add('Source', it.source); add('File', it.path);
+    add('Textures', it.textures); info.push('<dt>Materials</dt><dd id="dMaterials">…</dd>'); add('Size', fmtSize(it.size)); add('Source', it.source); add('File', it.path);
     view.show(it);
   } else {
     $('#loading').hidden = true;
