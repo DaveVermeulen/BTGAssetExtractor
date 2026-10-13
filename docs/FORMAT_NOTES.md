@@ -145,7 +145,9 @@ The layers are combined like D3D texture stages: stage k's colour op (batch `+0x
 layer k mixes with the layers before it (seen: ADD, SUBTRACT, BLENDTEXTUREALPHA, MODULATE); a final stage
 modulates with the vertex colour. In the data: 2,325 one-layer, 302 two-layer, 96 three-layer and 20
 four-layer records. glTF export: layer 0 is the base colour texture; every layer, with its image, op, scroll
-and rotate, is listed in `material.extras.btg.layers`.
+rotate, and its texture address mode U/V from the batch sampler list (`+0x2C`, raw D3DTEXTUREADDRESS:
+1 wrap, 2 mirror, 3 clamp), is listed in `material.extras.btg.layers`. A rotating layer is often followed by a
+static MODULATE layer that masks the wrapped corners.
 
 ## Not decoded yet
 Collision meshes (start of .PCM).

@@ -111,3 +111,7 @@ dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
 #backToModel { align-self: flex-start; }
 .revealMsg { color: var(--muted); font-size: 12px; }
 .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+.nameRow { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.nameRow .name { flex: 1; min-width: 0; }
+.sreveal { flex: 0 0 auto; background: none; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 11px; padding: 1px 7px; white-space: nowrap; }
+.sreveal:hover { color: var(--text); border-color: var(--accent); }

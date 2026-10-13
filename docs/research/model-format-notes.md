@@ -33,7 +33,7 @@ Byte-oriented LZ/RLE. Read control byte `c`:
 ### Relocation stream
 u32 list. A value with bit 31 set starts a group (`type = v & 0x7FFFFFFF`), following values are
 offsets in the main block that hold pointers (pointers are offsets into the main block).
-Group types seen: 0x01 texture, 0x07 animated texture, 0x20/0x21/0x22 draw batch,
+Group types seen: 0x01 texture, 0x07 animated (layered, scrolling) texture, 0x20/0x21/0x22 draw batch,
 0x23/0x24 vertex+index buffer, 0x113 RIFF sound, 0x04 animation data, others not decoded.
 
 ## Geometry
@@ -72,10 +72,69 @@ batch gets weight 1.0 on that bone.
 
 ## Animations (type 0x04)
 A clip points into the name table of the skeleton it drives (the pointer lies in `[u32(h+8), u32(h+4))` of
-the skeleton header). Per bone it stores key times normalised to 0..1 and int16 quaternions in D3DX order;
-x, y, z are scaled by 1/32767 and w by 1/1024 before normalising. Clip length in seconds = 1 / speed field.
-Only rotations are exported.
+the skeleton header). Clip header (all offsets from the clip start, pointers into the main block):
+```
++0x04 ptr name        +0x10 u32 id           +0x18 u32 channelCount   +0x1C ptr channelIds (i32[])
++0x20 u32 keyCount    +0x24 ptr keyTimes (f32[], 0..1)                +0x28 ptr key data start
++0x2C ptr rotKeys (ptr[keyCount])             +0x30 ptr transKeys (ptr[keyCount])
++0x34 f32 speed (clip length in seconds = 1 / speed)                  +0x38, +0x3C f32 0.1 (blend times?)
+```
+* Channel id `c >= 0` drives bone `c` with rotation **and** translation; `c < 0` drives bone `-c-1` with
+  rotation only. So the "-1" channel is bone 0 (`Scene Root`), which is never animated in practice.
+* `rotKeys[k]`: one int16 quaternion per channel in D3DX order x, y, z, w; x, y, z are scaled by 1/32767 and
+  w by 1/1024 before normalising. They are absolute local rotations that replace the bind rotation, not offsets from it.
+* `transKeys[k]`: float x, y, z per channel. Key 0 lists **every** channel; later keys list only the
+  `c >= 0` channels, in channel order. Values are offsets added to the bone's bind translation, in the
+  parent's space; channels without later keys hold their key-0 offset for the whole clip. This carries
+  pelvis bob, prop movement and full root motion (cutscene clips move characters tens of units).
+* Blocks are stored back to back per key: rotations, then translations. All 1,627 clips in the retail
+  data follow this layout exactly.
+* There is no scale channel; the engine's pose blender (`BIONICLE.exe` @ 0x42C3F0) only mixes a
+  quaternion and a translation per bone. The exporter interpolates keys linearly.
+
+The exporter writes a translation track for every bone that any clip of that skeleton moves, in every
+clip (unmoved bones get their bind translation), so switching clips in Blender never leaves a bone offset.
+
+## Materials: transparency and blend modes
+Each draw batch carries its D3D state as three lists:
+```
++0x14 u32 material colour (ARGB; alpha = batch opacity)   +0x18 u32 (byte repeated 4x, unknown)
++0x1C u32 count, +0x20 ptr  (D3DRENDERSTATETYPE, value) pairs
++0x24 u32 count, +0x28 ptr  (stage, D3DTEXTURESTAGESTATETYPE, value) triples
++0x2C u32 count, +0x30 ptr  (stage, D3DSAMPLERSTATETYPE, value) triples (address U/V: wrap or clamp)
+```
+Render states seen: 14 ZWRITEENABLE, 15 ALPHATESTENABLE, 19 SRCBLEND, 20 DESTBLEND, 22 CULLMODE,
+27 ALPHABLENDENABLE, 171 BLENDOP. Combinations:
+
+| States | Meaning | glTF export |
+|---|---|---|
+| none, or 27=0 | opaque | `OPAQUE` |
+| 27=1, or 19/20 without 27=0, with SRCALPHA / INVSRCALPHA (5/6) | alpha blend | `BLEND` |
+| same with SRCALPHA / ONE (5/2), usually with z-write off | additive (glows, fire, sparks) | `BLEND` + `extras.btg.blend = "additive"` |
+| 15=1 | alpha test | `MASK`, cutoff 0.5 |
+
+Most level batches (types 0x20) have an empty list and are opaque. Entity batches (0x21, 0x22) list the
+full state. Texture alpha only counts when blending or alpha test is on; on opaque batches it is a gloss
+mask. Transparency can also come from vertex colour alpha (stride-24 vertices), which glTF multiplies in.
+Every non-opaque material gets `extras.btg = {blend, depthWrite, srcBlend, dstBlend}` (D3DBLEND values).
+A batch flagged alpha-blend with an opaque texture, no vertex alpha and full opacity is exported opaque.
+
+## Animated textures (relocation type 0x07)
+There are no flipbooks. An animated texture is a stack of texture layers whose UVs scroll and rotate:
+```
++0x00 vtbl  +0x04 u32 w  +0x08 u32 h  +0x0C u32 layerCount (1-4)  +0x10 ptr layers (normally +0x20)
+layer (0x40 bytes): ptr texture, f32 scrollU, f32 scrollV, f32 rotate, f32 tint[4] (always 1),
+                    f32 unknown[3] (almost always 0, 1, 1), zero padding
+```
+Scroll values look like UV units per second and rotate like radians per second (e.g. -0.0349 for a slowly
+turning sky, multiples of pi/18 elsewhere); this reading is inferred from the values, not from engine code.
+The layers are combined like D3D texture stages: stage k's colour op (batch `+0x24` list, type 1) says how
+layer k mixes with the layers before it (seen: ADD, SUBTRACT, BLENDTEXTUREALPHA, MODULATE); a final stage
+modulates with the vertex colour. In the data: 2,325 one-layer, 302 two-layer, 96 three-layer and 20
+four-layer records. glTF export: layer 0 is the base colour texture; every layer, with its image, op, scroll
+rotate, and its texture address mode U/V from the batch sampler list (`+0x2C`, raw D3DTEXTUREADDRESS:
+1 wrap, 2 mirror, 3 clamp), is listed in `material.extras.btg.layers`. A rotating layer is often followed by a
+static MODULATE layer that masks the wrapped corners.
 
 ## Not decoded yet
-Animation translations / root motion, a channel id of -1 seen in some clips, collision meshes (start of .PCM),
-material blend modes and transparency, animated texture frames past the first.
+Collision meshes (start of .PCM).

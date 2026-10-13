@@ -148,10 +148,16 @@ function soundCard(el, it, i) {
   el.className = 'card snd';
   const ch = it.channels === 2 ? 'stereo' : it.channels === 1 ? 'mono' : '';
   el.innerHTML = `<button class="play" title="Play / pause">▶</button>
-    <div class="body"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div>
+    <div class="body"><div class="nameRow"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div>
+    <button class="sreveal" title="${REVEAL_LABEL}">${REVEAL_LABEL}</button></div>
     <div class="wave"><canvas></canvas><div class="prog"></div></div>
     <div class="sub">${esc([fmtTime(it.duration), levelLabel(it.level), it.group === 'sfx' ? 'effect' : 'music/speech', ch].filter(Boolean).join(' · '))}</div></div>`;
   el.querySelector('.play').addEventListener('click', () => toggleSound(el, it));
+  el.querySelector('.sreveal').addEventListener('click', async (e) => {
+    const err = await revealFile(it.path);
+    e.target.textContent = err || REVEAL_LABEL;
+    if (err) setTimeout(() => { e.target.textContent = REVEAL_LABEL; }, 3000);
+  });
   el.querySelector('.wave').addEventListener('click', (e) => {
     const r = e.currentTarget.getBoundingClientRect();
     const f = (e.clientX - r.left) / r.width;
@@ -306,6 +312,17 @@ const LAYER_OPS = {
   blendtexturealpha: 'c.rgb = mix(c.rgb, t.rgb, t.a);',
 };
 const texLoader = new THREE.TextureLoader();
+// Texture address mode per layer, as [wrapS, wrapT]. Uses the game's own D3DTEXTUREADDRESS values when
+// the converter exports them (layer.address = [u, v]: 1 wrap, 2 mirror, 3 clamp, 4 border). Without
+// them, a layer that rotates in place is treated as a non-tiling decal and clamped, so the neighbouring
+// tiles don't show up in its corners at 45 degrees; everything else tiles.
+const D3D_ADDRESS = { 1: THREE.RepeatWrapping, 2: THREE.MirroredRepeatWrapping, 3: THREE.ClampToEdgeWrapping, 4: THREE.ClampToEdgeWrapping };
+function layerWrap(l) {
+  const a = l.address;
+  if (Array.isArray(a) && D3D_ADDRESS[a[0]] !== undefined) return [D3D_ADDRESS[a[0]], D3D_ADDRESS[a[1]] ?? D3D_ADDRESS[a[0]]];
+  const scrolls = (l.scroll || []).some((x) => x);
+  return l.rotate && !scrolls ? [THREE.ClampToEdgeWrapping, THREE.ClampToEdgeWrapping] : [THREE.RepeatWrapping, THREE.RepeatWrapping];
+}
 function setupLayers(root, baseUrl) {
   let animated = 0;
   root.traverse((o) => {
@@ -318,12 +335,12 @@ function setupLayers(root, baseUrl) {
       animated++;
       m.userData._layers = true;
       // The loader shares one Texture between materials; give this one its own wrap settings.
-      m.map = m.map.clone(); m.map.wrapS = m.map.wrapT = THREE.RepeatWrapping; m.map.needsUpdate = true;
+      m.map = m.map.clone(); [m.map.wrapS, m.map.wrapT] = layerWrap(layers[0]); m.map.needsUpdate = true;
       const n = Math.min(layers.length, 4);
       const extra = [];
       for (let k = 1; k < n; k++) {
         const t = texLoader.load(new URL(layers[k].image, baseUrl).href);
-        t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping;
+        t.flipY = false; t.colorSpace = THREE.SRGBColorSpace; [t.wrapS, t.wrapT] = layerWrap(layers[k]);
         extra.push(t);
       }
       m.userData._btgTex = extra;
@@ -651,11 +668,15 @@ function fillLinks(el, path) {
   el.innerHTML = `<button class="reveal">${REVEAL_LABEL}</button><a href="${fileUrl(path)}" download>Download</a><span class="revealMsg"></span>`;
   el.querySelector('.reveal').onclick = async () => {
     const msg = el.querySelector('.revealMsg'); msg.textContent = '';
-    try {
-      const r = await fetch('/api/reveal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
-      if (!r.ok) msg.textContent = 'Could not open the folder' + (r.status === 404 ? ': file not found' : '');
-    } catch { msg.textContent = 'Could not reach the viewer'; }
+    msg.textContent = await revealFile(path);
   };
+}
+// Asks the local server to open File Explorer / Finder at the file. Returns an error message, or ''.
+async function revealFile(path) {
+  try {
+    const r = await fetch('/api/reveal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+    return r.ok ? '' : 'Could not open the folder' + (r.status === 404 ? ': file not found' : '');
+  } catch { return 'Could not reach the viewer'; }
 }
 function showPane(id) {
   for (const p of ['paneDetails', 'paneTex', 'paneTexView']) $('#' + p).hidden = p !== id;

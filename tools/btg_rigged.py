@@ -117,19 +117,25 @@ TEXOPS={1:'disable',2:'selectArg1',3:'selectArg2',4:'modulate',5:'modulate2x',6:
 def tex_layers(m,texobj,b):
     """Animated texture (relocation type 0x07): +0x0C layer count, +0x10 ptr to 0x40-byte layers:
     ptr texture, f32 scrollU, scrollV (UV units/s), rotate (rad/s), f32[4] tint, f32[3] unknown (wave?).
-    Layer k>0 is combined onto the result by the colour op of texture stage k (batch +0x24 list)."""
+    Layer k>0 is combined onto the result by the colour op of texture stage k (batch +0x24 list);
+    its D3DTEXTUREADDRESS U/V (1 wrap, 2 mirror, 3 clamp, 4 border) come from the sampler list (+0x2C)."""
     n,lp=struct.unpack_from('<2I',m,texobj+0xc)
     if not 0<n<9 or lp+0x40*n>len(m): return None
     c,p=struct.unpack_from('<2I',m,b+0x24); ops={}
     if 0<c<64 and p+12*c<=len(m):
         t=struct.unpack_from('<%dI'%(3*c),m,p)
         ops={t[i]:t[i+2] for i in range(0,3*c,3) if t[i+1]==1}
+    c,p=struct.unpack_from('<2I',m,b+0x2c); addr={}
+    if 0<c<64 and p+12*c<=len(m):
+        t=struct.unpack_from('<%dI'%(3*c),m,p)
+        for i in range(0,3*c,3):
+            if t[i+1] in (1,2): addr[(t[i],t[i+1])]=t[i+2]
     out=[]
     for k in range(n):
         w=struct.unpack_from('<I15f',m,lp+0x40*k)
         out.append(dict(tex=w[0],op='base' if k==0 else TEXOPS.get(ops.get(k),'modulate'),
             scroll=[round(w[1],5),round(w[2],5)],rotate=round(w[3],5),tint=[round(x,4) for x in w[4:8]],
-            params=[round(x,5) for x in w[8:11]]))
+            params=[round(x,5) for x in w[8:11]],address=[addr.get((k,1),1),addr.get((k,2),1)]))
     if n==1 and not any(out[0]['scroll']) and not out[0]['rotate']: return None
     return out
 
