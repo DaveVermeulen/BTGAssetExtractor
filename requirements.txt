@@ -1,0 +1,4 @@
+# Only needed for the 3D model tools (btg_models.py, btg_rigged.py).
+# bionicle_extract.py (textures and audio) uses the Python standard library only.
+numpy>=1.21
+Pillow>=9.0

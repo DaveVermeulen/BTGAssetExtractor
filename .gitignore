@@ -1,21 +1,47 @@
-﻿# Never commit game data or extracted assets (copyrighted, large)
-output/
-scratch/
+﻿# Game files: never commit these
+Data/
 *.vol
 *.avl
+*.exe
+*.dll
+*.bik
+
+# Extracted output: never commit this
+output/
+extracted/
+converted/
+*.gltf
+*.glb
+*.bin
+*.wav
+*.dds
+*.tga
+manifest.json
+texture_index.json
+index.csv
+characters.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Workspace scratch and raw game file types (from the original setup)
+scratch/
 *.PCM
 *.PCA
 *.PCS
-*.bik
-*.exe
-*.dll
-
-# Python / editor noise
-__pycache__/
 *.pyc
-.venv/
-.vscode/
-.idea/
-
-# Local Claude settings
-.claude/settings.local.json
