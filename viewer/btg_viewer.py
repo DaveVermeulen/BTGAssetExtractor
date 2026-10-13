@@ -177,7 +177,10 @@ def build_index(root, log=print):
     for n, p in enumerate(model_files):
         if n and n % 500 == 0: log('  models: %d / %d' % (n, len(model_files)))
         r = rel(p)
-        st = os.stat(p)
+        try:
+            st = os.stat(p)
+        except OSError:            # deleted while we were scanning (e.g. the converter is re-running)
+            continue
         stamp = [st.st_size, int(st.st_mtime)]
         hit = old_models.get(r)
         if hit and hit.get('stamp') == stamp:
@@ -203,6 +206,8 @@ def build_index(root, log=print):
 
     for p in files:
         ext = os.path.splitext(p)[1].lower()
+        if ext in IMAGE_EXT or ext == '.wav':
+            if not os.path.isfile(p): continue
         r = rel(p)
         if r.startswith(CACHE_DIR + '/'): continue
         if ext in IMAGE_EXT and os.path.normpath(p) not in referenced:
