@@ -325,6 +325,7 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
+        if not self.local_host(): return self.send_error(403)
         url = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(url.path)
         q = urllib.parse.parse_qs(url.query)
@@ -350,13 +351,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/': path = '/index.html'
         return self.send_file(safe_join(WEB, path.lstrip('/')))
 
+    def local_host(self):
+        # A page on another site that rebinds its DNS name to 127.0.0.1 still sends its own name as Host.
+        host = self.headers.get('Host', '')
+        return urllib.parse.urlsplit('//' + host).hostname in ('127.0.0.1', 'localhost')
+
     def same_origin(self):
         # Browsers always send Origin on POST; refuse requests from any other web page.
-        # The Host check stops DNS-rebinding pages, whose Origin and Host both name the attacker's domain.
         origin = self.headers.get('Origin', '')
-        host = self.headers.get('Host', '')
-        local = host.rsplit(':', 1)[0] in ('127.0.0.1', 'localhost')
-        return local and bool(origin) and urllib.parse.urlsplit(origin).netloc == host
+        return self.local_host() and bool(origin) and urllib.parse.urlsplit(origin).netloc == self.headers.get('Host', '')
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
@@ -425,10 +428,9 @@ def main():
     State.root = os.path.abspath(a.folder)
     print('Indexing %s ...' % State.root)
     State.index = build_index(State.root)
-    srv = None
-    # On Windows SO_REUSEADDR lets a second server bind a port that is already in use, so two
-    # viewers would silently share 8765; turn it off there so we move on to the next free port.
+    # On Windows SO_REUSEADDR lets a second server bind a port that is already in use.
     ThreadingHTTPServer.allow_reuse_address = sys.platform != 'win32'
+    srv = None
     for port in range(a.port, a.port + 20):
         try:
             srv = ThreadingHTTPServer(('127.0.0.1', port), Handler); break
