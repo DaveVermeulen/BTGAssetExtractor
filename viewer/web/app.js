@@ -499,6 +499,47 @@ const view = (() => {
 
 let detailIndex = -1;
 const imgView = { bg: 'checker', alpha: true, zoom: 0 };
+const REVEAL_LABEL = /Mac/i.test(navigator.platform) ? 'Show in Finder' : /Win/i.test(navigator.platform) ? 'Show in File Explorer' : 'Show in file manager';
+function fillLinks(el, path) {
+  el.innerHTML = `<button class="reveal">${REVEAL_LABEL}</button><a href="${fileUrl(path)}" download>Download</a><span class="revealMsg"></span>`;
+  el.querySelector('.reveal').onclick = async () => {
+    const msg = el.querySelector('.revealMsg'); msg.textContent = '';
+    try {
+      const r = await fetch('/api/reveal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+      if (!r.ok) msg.textContent = 'Could not open the folder' + (r.status === 404 ? ': file not found' : '');
+    } catch { msg.textContent = 'Could not reach the viewer'; }
+  };
+}
+function showPane(id) {
+  for (const p of ['paneDetails', 'paneTex', 'paneTexView']) $('#' + p).hidden = p !== id;
+  $('#dTabs').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.pane === id));
+}
+function backToModel() {
+  $('#viewImage').hidden = true; $('#view3d').hidden = false; $('#dTabs').hidden = false;
+  showPane('paneTex');
+}
+function openModelTexture(path) {
+  $('#view3d').hidden = true; $('#viewImage').hidden = false; $('#dTabs').hidden = true;
+  showPane('paneTexView');
+  $('#tTitle').textContent = path.split('/').pop();
+  const tex = { path };
+  showImage(tex, $('#tControls'), () => {
+    const img = $('#bigImg');
+    $('#tInfo').innerHTML = `<dt>Dimensions</dt><dd>${img.naturalWidth} × ${img.naturalHeight}</dd><dt>File</dt><dd>${esc(path)}</dd>`;
+  });
+  fillLinks($('#tLinks'), path);
+}
+function fillModelTextures(it) {
+  const imgs = it.images || [];
+  $('#texCount').textContent = imgs.length;
+  $('#texGrid').innerHTML = imgs.length ? imgs.map((p, k) => `<button class="ttile" data-k="${k}" title="${esc(p)}"><div class="thumb"><img loading="lazy" src="${fileUrl(p)}" alt=""></div><span>…</span></button>`).join('')
+    : '<p class="sub">This model has no textures.</p>';
+  $('#texGrid').querySelectorAll('.ttile').forEach((b) => {
+    const img = b.querySelector('img');
+    img.onload = () => { b.querySelector('span').textContent = `${img.naturalWidth}×${img.naturalHeight}`; };
+    b.onclick = () => openModelTexture(imgs[+b.dataset.k]);
+  });
+}
 function openDetail(i) {
   detailIndex = i;
   const it = state.list[i]; if (!it) return;
@@ -506,6 +547,8 @@ function openDetail(i) {
   $('#dTitle').textContent = displayName(it);
   const isModel = state.tab === 'static' || state.tab === 'animated';
   $('#view3d').hidden = !isModel; $('#viewImage').hidden = isModel;
+  $('#dTabs').hidden = !isModel; showPane('paneDetails');
+  if (isModel) fillModelTextures(it);
   const info = [];
   const add = (k, v) => { if (v !== undefined && v !== '' && v !== null) info.push(`<dt>${k}</dt><dd>${esc(v)}</dd>`); };
   if (isModel) {
@@ -523,19 +566,18 @@ function openDetail(i) {
     showImage(it);
   }
   $('#dInfo').innerHTML = info.join('');
-  $('#dLinks').innerHTML = `<a href="${fileUrl(it.path)}" target="_blank">Open file</a><a href="${fileUrl(it.path)}" download>Download</a>`;
+  fillLinks($('#dLinks'), it.path);
   $('#prevBtn').hidden = i <= 0; $('#nextBtn').hidden = i >= state.list.length - 1;
 }
-function showImage(it) {
+function showImage(it, c = $('#dControls'), onLoad) {
   const img = $('#bigImg'), cv = $('#bigCanvas');
-  const c = $('#dControls');
   const btn = (k, v, l) => `<button class="toggle ${imgView[k] === v ? 'on' : ''}" data-k="${k}" data-v="${v}">${l}</button>`;
   c.innerHTML = `<div><label>Background</label><div class="row">${btn('bg', 'checker', 'Checker')}${btn('bg', 'black', 'Black')}${btn('bg', 'white', 'White')}</div></div>
     <div><label>Zoom</label><div class="row">${btn('zoom', 0, 'Fit')}${btn('zoom', 1, '1×')}${btn('zoom', 2, '2×')}${btn('zoom', 4, '4×')}</div></div>
     <div><label>Alpha channel</label><div class="row">${btn('alpha', true, 'Use alpha')}${btn('alpha', false, 'Ignore alpha')}</div></div>`;
   c.querySelectorAll('[data-k]').forEach((b) => b.onclick = () => {
     const k = b.dataset.k; imgView[k] = k === 'zoom' ? +b.dataset.v : k === 'alpha' ? b.dataset.v === 'true' : b.dataset.v;
-    showImage(it);
+    showImage(it, c, onLoad);
   });
   $('#viewImage').className = imgView.bg === 'checker' ? '' : imgView.bg;
   const apply = () => {
@@ -550,6 +592,7 @@ function showImage(it) {
       const g = cv.getContext('2d'); g.drawImage(img, 0, 0);
       const d = g.getImageData(0, 0, w, h); for (let p = 3; p < d.data.length; p += 4) d.data[p] = 255; g.putImageData(d, 0, 0);
     }
+    onLoad?.();
   };
   const url = fileUrl(it.path);
   if (img.getAttribute('src') !== url) { img.onload = apply; img.src = url; } else if (img.complete) apply();
@@ -573,13 +616,15 @@ $('#chips').addEventListener('click', (e) => { const b = e.target.closest('.chip
 $('#cardSize').addEventListener('input', (e) => { document.documentElement.style.setProperty('--card', e.target.value + 'px'); try { localStorage.setItem('btgCard', e.target.value); } catch {} });
 $('#renderAll').addEventListener('click', () => thumbs.renderAll());
 $('#closeBtn').onclick = closeDetail;
+$('#backToModel').onclick = backToModel;
+$('#dTabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) showPane(b.dataset.pane); });
 $('#prevBtn').onclick = () => step(-1);
 $('#nextBtn').onclick = () => step(1);
 $('#overlay').addEventListener('click', (e) => { if (e.target.id === 'overlay') closeDetail(); });
 document.addEventListener('keydown', (e) => {
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) && e.target.type !== 'range') return;
   if ($('#overlay').hidden) { if (e.key === '/') { e.preventDefault(); $('#search').focus(); } return; }
-  if (e.key === 'Escape') closeDetail();
+  if (e.key === 'Escape') { if (!$('#paneTexView').hidden) backToModel(); else closeDetail(); }
   else if (e.key === 'ArrowLeft') step(-1);
   else if (e.key === 'ArrowRight') step(1);
   else if (e.key === ' ') { e.preventDefault(); view.togglePlay(); }

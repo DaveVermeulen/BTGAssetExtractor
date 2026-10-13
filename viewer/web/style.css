@@ -77,20 +77,36 @@ aside { width: 320px; flex: 0 0 320px; border-left: 1px solid var(--line); paddi
 .asideHead { display: flex; align-items: start; gap: 8px; }
 .asideHead h2 { flex: 1; font-size: 17px; margin: 0; word-break: break-all; }
 #closeBtn { background: none; border: 0; font-size: 18px; color: var(--muted); }
-#dControls { display: flex; flex-direction: column; gap: 10px; }
+#dControls, #tControls { display: flex; flex-direction: column; gap: 10px; }
 .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .toggle { background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 13px; }
 .toggle.on { background: var(--accent); color: #111; border-color: var(--accent); }
 .small { padding: 5px 10px; font-size: 13px; }
-#dControls label { color: var(--muted); font-size: 12px; }
+#dControls label, #tControls label { color: var(--muted); font-size: 12px; }
 #dControls select { width: 100%; }
 #timeline { width: 100%; accent-color: var(--accent); }
 #timeLabel { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
 dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
 dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
-#dLinks a { color: var(--accent2); font-size: 13px; margin-right: 12px; }
 
 @media (max-width: 800px) {
   .panel { flex-direction: column; } aside { width: auto; flex: 0 0 auto; max-height: 45%; border-left: 0; border-top: 1px solid var(--line); }
   #toolbar { top: 0; position: static; }
 }
+
+.subtabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+.subtabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 6px 10px; color: var(--muted); }
+.subtabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.pane { display: flex; flex-direction: column; gap: 14px; }
+.links { display: flex; gap: 8px; flex-wrap: wrap; }
+.links a, .links button { background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 13px; color: var(--text); text-decoration: none; }
+.links a:hover, .links button:hover { border-color: var(--accent); }
+#texGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+.ttile { background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; cursor: pointer; padding: 0; text-align: left; }
+.ttile:hover { border-color: var(--accent); }
+.ttile .thumb { aspect-ratio: 1; }
+.ttile .thumb img { image-rendering: pixelated; }
+.ttile span { display: block; font-size: 11px; color: var(--muted); padding: 3px 5px; }
+#paneTexView h3 { margin: 0; font-size: 14px; word-break: break-all; }
+#backToModel { align-self: flex-start; }
+.revealMsg { color: var(--muted); font-size: 12px; }

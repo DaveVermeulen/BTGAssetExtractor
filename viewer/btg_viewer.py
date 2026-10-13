@@ -15,7 +15,7 @@ What it looks for anywhere under the folder:
   index.csv, characters.csv, manifest.json, LEVELS.TXT   extra info (source file, level names)
 """
 import sys, os, json, struct, csv, re, hashlib, threading, time, wave, array, argparse, webbrowser
-import mimetypes, urllib.parse
+import mimetypes, urllib.parse, subprocess, shutil
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
@@ -196,7 +196,7 @@ def build_index(root, log=print):
         if row.get('kind') == 'level' and row.get('title'):
             levels.setdefault(name, row['title'])
         animated = bool(info['clips']) or info['bones'] > 0
-        models.append(dict(info, path=r, name=name.split('__')[0], id=name, folder=folder,
+        models.append(dict(info, path=r, images=[rel(i) for i in imgs], name=name.split('__')[0], id=name, folder=folder,
                            kind='animated' if animated else 'static',
                            source=row.get('source', ''), level=level_of(row.get('source'), name if folder == 'levels' else ''),
                            thumb=hashlib.sha1(('%s|%d|%d' % (r, st.st_size, int(st.st_mtime))).encode()).hexdigest()[:24]))
@@ -350,13 +350,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/': path = '/index.html'
         return self.send_file(safe_join(WEB, path.lstrip('/')))
 
-    def do_POST(self):
-        path = urllib.parse.urlsplit(self.path).path
-        key = path[len('/api/thumb/'):] if path.startswith('/api/thumb/') else ''
-        # Only accept thumbnails from the viewer page itself.
+    def same_origin(self):
+        # Browsers always send Origin on POST; refuse requests from any other web page.
+        # The Host check stops DNS-rebinding pages, whose Origin and Host both name the attacker's domain.
         origin = self.headers.get('Origin', '')
         host = self.headers.get('Host', '')
-        if not re.fullmatch(r'[0-9a-f]{24}', key) or (origin and urllib.parse.urlsplit(origin).netloc != host):
+        local = host.rsplit(':', 1)[0] in ('127.0.0.1', 'localhost')
+        return local and bool(origin) and urllib.parse.urlsplit(origin).netloc == host
+
+    def do_POST(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == '/api/reveal':
+            return self.reveal()
+        key = path[len('/api/thumb/'):] if path.startswith('/api/thumb/') else ''
+        # Only accept thumbnails from the viewer page itself.
+        if not re.fullmatch(r'[0-9a-f]{24}', key) or not self.same_origin():
             return self.send_error(403)
         n = int(self.headers.get('Content-Length') or 0)
         if not 0 < n <= 2 << 20: return self.send_error(413)
@@ -368,6 +376,42 @@ class Handler(BaseHTTPRequestHandler):
         with open(tmp, 'wb') as f: f.write(data)
         os.replace(tmp, os.path.join(d, key + '.png'))
         self.send_response(204); self.end_headers()
+
+
+    def reveal(self):
+        """Show a file from the output folder in File Explorer / Finder / the file manager."""
+        if not self.same_origin() or self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+            return self.send_error(403)
+        n = int(self.headers.get('Content-Length') or 0)
+        if not 0 < n <= 4096: return self.send_error(413)
+        try:
+            rel = json.loads(self.rfile.read(n)).get('path', '')
+        except (ValueError, AttributeError):
+            return self.send_error(400)
+        p = safe_join(State.root, rel) if isinstance(rel, str) else None
+        if not p or not os.path.exists(p): return self.send_error(404)
+        try:
+            reveal_in_file_manager(p)
+        except (OSError, RuntimeError) as e:
+            return self.send_json({'error': str(e)}, 500)
+        self.send_response(204); self.end_headers()
+
+
+def reveal_in_file_manager(p):
+    if sys.platform == 'win32':
+        # explorer.exe parses its own command line; Windows paths can't contain quotes.
+        subprocess.Popen('explorer /select,"%s"' % os.path.normpath(p))
+    elif sys.platform == 'darwin':
+        subprocess.Popen(['open', '-R', p])
+    else:
+        uri = 'file://' + urllib.parse.quote(p)
+        if shutil.which('dbus-send'):
+            r = subprocess.run(['dbus-send', '--session', '--print-reply', '--dest=org.freedesktop.FileManager1',
+                                '/org/freedesktop/FileManager1', 'org.freedesktop.FileManager1.ShowItems',
+                                'array:string:' + uri, 'string:'], capture_output=True, timeout=5)
+            if r.returncode == 0: return
+        if not shutil.which('xdg-open'): raise RuntimeError('no file manager found')
+        subprocess.Popen(['xdg-open', os.path.dirname(p)])
 
 
 def main():
@@ -382,6 +426,9 @@ def main():
     print('Indexing %s ...' % State.root)
     State.index = build_index(State.root)
     srv = None
+    # On Windows SO_REUSEADDR lets a second server bind a port that is already in use, so two
+    # viewers would silently share 8765; turn it off there so we move on to the next free port.
+    ThreadingHTTPServer.allow_reuse_address = sys.platform != 'win32'
     for port in range(a.port, a.port + 20):
         try:
             srv = ThreadingHTTPServer(('127.0.0.1', port), Handler); break

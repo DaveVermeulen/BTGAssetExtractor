@@ -61,9 +61,23 @@
         <h2 id="dTitle"></h2>
         <button id="closeBtn" title="Close (Esc)">✕</button>
       </div>
-      <div id="dControls"></div>
-      <dl id="dInfo"></dl>
-      <div id="dLinks"></div>
+      <div id="dTabs" class="subtabs" hidden>
+        <button data-pane="paneDetails" class="on">Details</button>
+        <button data-pane="paneTex">Textures <span class="count" id="texCount"></span></button>
+      </div>
+      <div id="paneDetails" class="pane">
+        <div id="dControls"></div>
+        <dl id="dInfo"></dl>
+        <div id="dLinks" class="links"></div>
+      </div>
+      <div id="paneTex" class="pane" hidden><div id="texGrid"></div></div>
+      <div id="paneTexView" class="pane" hidden>
+        <button id="backToModel" class="toggle">‹ Back to model</button>
+        <h3 id="tTitle"></h3>
+        <div id="tControls"></div>
+        <dl id="tInfo"></dl>
+        <div id="tLinks" class="links"></div>
+      </div>
     </aside>
   </div>
 </div>
