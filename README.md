@@ -107,6 +107,17 @@ output/models/
   characters.csv                       source file and bone, clip and mesh counts per character
 ```
 
+### 4. Browse everything
+
+```sh
+python viewer/btg_viewer.py output
+```
+
+Opens a local, offline browser viewer at `http://127.0.0.1:8765/` with tabs for static meshes,
+animated characters (with clip playback), textures and sounds, each as a searchable grid with
+previews. Point it at whichever folder holds your extracted files (for example `output\converted`).
+See [viewer/README.md](viewer/README.md) for details.
+
 ## Opening the models in Blender
 
 1. **File → Import → glTF 2.0 (.glb/.gltf)** and pick a `.gltf` file.
@@ -153,6 +164,7 @@ Pull requests for anything on the to-do list are welcome; see [CONTRIBUTING.md](
 | Path | What |
 |---|---|
 | `tools/` | the three extractors above, plus `volt.ps1`, a PowerShell-only VOLT archive lister/unpacker |
+| `viewer/` | local browser-based asset viewer (bundles three.js, MIT) |
 | `docs/FORMAT_NOTES.md` | consolidated file format notes |
 | `docs/formats.md` | first-pass survey of the install and archive layout |
 | `docs/research/` | working notes from the reverse-engineering (texture/audio and model notes, archive index) |

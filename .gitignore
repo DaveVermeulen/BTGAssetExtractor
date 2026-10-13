@@ -48,3 +48,6 @@ scratch/
 
 # Local Claude Code project settings (contain machine-specific paths)
 .claude/
+
+# Asset viewer thumbnail cache
+.viewer-cache/

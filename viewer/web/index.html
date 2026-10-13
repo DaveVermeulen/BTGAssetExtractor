@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BTG Asset Viewer</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/three.module.min.js",
+  "three/addons/": "./vendor/three/addons/"
+} }
+</script>
+</head>
+<body>
+<header>
+  <div class="brand">BTG Asset Viewer <span id="rootName"></span></div>
+  <nav id="tabs">
+    <button data-tab="static">Static meshes <span class="count"></span></button>
+    <button data-tab="animated">Animated meshes <span class="count"></span></button>
+    <button data-tab="textures">Textures <span class="count"></span></button>
+    <button data-tab="sounds">Sounds <span class="count"></span></button>
+  </nav>
+</header>
+<div id="toolbar">
+  <input id="search" type="search" placeholder="Search names, files, sources" autocomplete="off">
+  <select id="level" title="Level"></select>
+  <div id="chips"></div>
+  <select id="sort" title="Sort">
+    <option value="name">Name</option>
+    <option value="level">Level</option>
+    <option value="size">Largest first</option>
+    <option value="detail">Most detail first</option>
+  </select>
+  <label class="slider" title="Card size">Size <input id="cardSize" type="range" min="110" max="320" value="170"></label>
+  <button id="renderAll" class="small" hidden>Render all thumbnails</button>
+  <span id="status"></span>
+</div>
+<main>
+  <div id="summary"></div>
+  <div id="grid"></div>
+  <div id="more"></div>
+  <p id="empty" hidden>Nothing matches. Clear the search or pick another level.</p>
+</main>
+<footer>
+  Showing files from your own output folder. The viewer runs on this computer only and uploads nothing.
+  Extracted assets remain the property of their owners.
+</footer>
+
+<div id="overlay" hidden>
+  <div class="panel">
+    <div class="stage" id="stage">
+      <canvas id="view3d"></canvas>
+      <div id="viewImage" hidden><img id="bigImg" alt=""><canvas id="bigCanvas" hidden></canvas></div>
+      <div id="loading" hidden>Loading…</div>
+      <button class="nav prev" id="prevBtn" title="Previous (←)">‹</button>
+      <button class="nav next" id="nextBtn" title="Next (→)">›</button>
+    </div>
+    <aside>
+      <div class="asideHead">
+        <h2 id="dTitle"></h2>
+        <button id="closeBtn" title="Close (Esc)">✕</button>
+      </div>
+      <div id="dControls"></div>
+      <dl id="dInfo"></dl>
+      <div id="dLinks"></div>
+    </aside>
+  </div>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
