@@ -16,7 +16,7 @@ Blender.
 |---|---|
 | `tools/bionicle_extract.py` | ~2,770 textures (PNG), ~680 sounds and music tracks (16-bit WAV), the plain-text config files, and a `manifest.json` |
 | `tools/btg_models.py` | Every level as one glTF in world space (63 levels), plus ~2,650 unique entity meshes (characters, Rahi, masks, props, skydomes) in bind pose |
-| `tools/btg_rigged.py` | ~290 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…) with skeleton, skin weights and animation clips (rotation, translation and root motion) |
+| `tools/btg_rigged.py` | ~355 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…), one file per body variant, with skeleton, skin weights and animation clips (rotation, translation and root motion) |
 
 Counts are from the retail PC release; your numbers may differ slightly by version.
 
@@ -127,7 +127,7 @@ errors, so other glTF viewers work too.
 - [x] Plain-text config files from `general.vol` (level list, effects, controller maps)
 - [x] Level geometry in world space, one glTF per level (63 levels)
 - [x] Entity meshes in bind pose (~2,650: characters, Rahi, masks, props, skydomes)
-- [x] Rigged characters with skeleton and skin weights (~290)
+- [x] Rigged characters with skeleton and skin weights (~355), alternate body variants split into separate files
 - [x] Animation clips with bone rotations and translations, including root motion
 
 ### To do

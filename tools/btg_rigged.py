@@ -517,6 +517,39 @@ def assign(P,lib):
 
 def skel_key(s): return tuple((b['name'],b['parent']) for b in s)
 
+def node_verts(P,b):
+    """Unique vertex positions used by a mesh node's triangles."""
+    out=[]
+    for bt in b:
+        st_,raw,idx=P.vb(bt['vb']); ix=idx[bt['start']:bt['start']+bt['pc']+2]
+        if len(ix)<3 or ix.max()>=len(raw): continue
+        out.append(raw[np.unique(ix),:12].copy().view('<f4').reshape(-1,3))
+    return np.unique(np.concatenate(out),axis=0) if out else np.zeros((0,3),np.float32)
+
+def near_frac(A,B,tol):
+    """Fraction of points in A that lie within tol of some point in B."""
+    if not len(A) or not len(B): return 0.0
+    cells=set(map(tuple,np.floor(B/tol).astype(np.int64)))
+    g=np.floor(A/tol).astype(np.int64); hit=0
+    for c in map(tuple,g):
+        hit+=any((c[0]+x,c[1]+y,c[2]+z) in cells for x in(-1,0,1) for y in(-1,0,1) for z in(-1,0,1))
+    return hit/len(A)
+
+def split_variants(P,nodes,share=0.4):
+    """Meshes bound to one skeleton are often alternate versions of the same body (Ko-Matoran 1-5,
+    Bohrok kinds, a blink pose), sometimes offset by a few millimetres; exporting them together
+    stacks them on top of each other. Mesh nodes whose vertices lie within 1% of the model size of
+    another node's, for >= `share` of both, are variants and get one output each; the remaining
+    parts go with every variant."""
+    if len(nodes)<2: return [nodes]
+    V=[node_verts(P,b) for n,nm,b in nodes]
+    allv=np.concatenate(V); tol=max(float(np.ptp(allv,axis=0).max())*0.01,1e-4) if len(allv) else 1e-4
+    var=[i for i in range(len(nodes)) if any(j!=i and near_frac(V[i],V[j],tol)>=share and
+         near_frac(V[j],V[i],tol)>=share for j in range(len(nodes)))]
+    if not var: return [nodes]
+    parts=[nodes[i] for i in range(len(nodes)) if i not in var]
+    return [[nodes[i]]+parts for i in var]
+
 def anim_hash(a):
     return hashlib.md5(a['quats'].tobytes()+a['trans'].tobytes()+a['times'].tobytes()+a['channels'].tobytes()).hexdigest()
 
@@ -532,18 +565,19 @@ def run(packs,outdir):
         P=Pack(m,rel)
         out,miss=assign(P,lib)
         for nm in miss: rows.append(dict(source=base,kind='unrigged',name=nm))
-        for key,(s,nodes) in out.items():
-            sk=skel_key(s)
-            h=hashlib.md5(repr(sk).encode())
-            for n,nm,b in nodes:
-                for bt in b:
-                    st_,raw,idx=P.vb(bt['vb']); ix=idx[bt['start']:bt['start']+bt['pc']+2]; h.update(raw[ix].tobytes())
-            hd=h.hexdigest()
-            title=max(nodes,key=lambda x:sum(b['pc'] for b in x[2]))[1]
-            if hd in chars:
-                rows.append(dict(source=base,kind='character(dup)',name=title,hash=hd)); continue
-            chars[hd]=(P,nodes,s,sk,title)
-            rows.append(dict(source=base,kind='character',name=title,hash=hd))
+        for key,(s,allnodes) in out.items():
+            for nodes in split_variants(P,allnodes):
+                sk=skel_key(s)
+                h=hashlib.md5(repr(sk).encode())
+                for n,nm,b in nodes:
+                    for bt in b:
+                        st_,raw,idx=P.vb(bt['vb']); ix=idx[bt['start']:bt['start']+bt['pc']+2]; h.update(raw[ix].tobytes())
+                hd=h.hexdigest()
+                title=max(nodes,key=lambda x:sum(b['pc'] for b in x[2]))[1]
+                if hd in chars:
+                    rows.append(dict(source=base,kind='character(dup)',name=title,hash=hd)); continue
+                chars[hd]=(P,nodes,s,sk,title)
+                rows.append(dict(source=base,kind='character',name=title,hash=hd))
         print(base,flush=True)
     os.makedirs(outdir,exist_ok=True); done={}; tc={}
     for hd,(P,nodes,s,sk,title) in chars.items():
