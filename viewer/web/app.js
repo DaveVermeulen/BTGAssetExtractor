@@ -28,7 +28,7 @@ async function loadIndex(refresh) {
   DATA.static = DATA.models.filter((m) => m.kind === 'static');
   DATA.animated = DATA.models.filter((m) => m.kind === 'animated');
   for (const t of ['static', 'animated', 'textures', 'sounds']) {
-    for (const it of DATA[t]) it._search = [it.name, it.path, it.source, it.level, DATA.levels[it.level], ...(it.clips || [])].join(' ').toLowerCase();
+    for (const it of DATA[t]) it._search = [it.name, it.path, it.source, ...[it.level, ...(it.also_in || [])].flatMap((l) => [l, DATA.levels[l]]), ...(it.other_names || []), ...(it.clips || [])].join(' ').toLowerCase();
     document.querySelector(`[data-tab=${t}] .count`).textContent = fmtNum(DATA[t].length);
   }
   $('#rootName').textContent = DATA.root;
@@ -43,7 +43,7 @@ function levelKey(l) { const m = /^(\d+)-(\d+)$/.exec(l || ''); return m ? +m[1]
 function filtered() {
   const q = state.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
   let list = DATA[state.tab].filter((it) =>
-    (!state.level || it.level === state.level) &&
+    (!state.level || it.level === state.level || (it.also_in || []).includes(state.level)) &&
     (state.chip === 'all' || !TABS[state.tab].chips.length || it.folder === state.chip || it.group === state.chip) &&
     q.every((w) => it._search.includes(w)));
   const by = {
@@ -75,7 +75,7 @@ function writeHash() {
 
 function buildToolbar() {
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === state.tab));
-  const levels = [...new Set(DATA[state.tab].map((i) => i.level).filter(Boolean))].sort((a, b) => levelKey(a) - levelKey(b) || a.localeCompare(b));
+  const levels = [...new Set(DATA[state.tab].flatMap((i) => [i.level, ...(i.also_in || [])]).filter(Boolean))].sort((a, b) => levelKey(a) - levelKey(b) || a.localeCompare(b));
   // Keep the level the user picked across tabs; show all levels only where it doesn't exist.
   state.level = levels.includes(state.pickedLevel) ? state.pickedLevel : '';
   $('#level').innerHTML = `<option value="">All levels</option>` + levels.map((l) => `<option value="${esc(l)}">${esc(levelLabel(l))}</option>`).join('');
@@ -129,7 +129,8 @@ function makeCard(it, i) {
   } else {
     img = it.has_thumb ? `<img loading="lazy" src="/api/thumb/${it.thumb}.png" alt="">` : `<span class="ph">…</span>`;
     badge = state.tab === 'animated' ? `${it.clips.length} clip${it.clips.length === 1 ? '' : 's'}` : (it.folder === 'levels' ? 'level' : '');
-    sub = [levelLabel(it.level) || it.folder, fmtNum(it.tris) + ' tris'].filter(Boolean).join(' · ');
+    const lvl = state.level && (it.also_in || []).includes(state.level) ? state.level : it.level; // shared models: show the level being browsed
+    sub = [levelLabel(lvl) || it.folder, fmtNum(it.tris) + ' tris'].filter(Boolean).join(' · ');
     if (it.folder === 'levels') sub = [it.level, fmtNum(it.tris) + ' tris'].filter(Boolean).join(' · ');
   }
   el.innerHTML = `<div class="thumb ${state.tab === 'textures' ? 'tex' : ''}">${img}${badge ? `<span class="badge">${esc(badge)}</span>` : ''}</div>
@@ -761,6 +762,8 @@ function openDetail(i) {
   if (isModel) {
     add('Level', levelLabel(it.level)); add('Group', it.folder); add('Triangles', fmtNum(it.tris)); add('Vertices', fmtNum(it.verts));
     if (it.bones) add('Bones', it.bones); if (it.clips.length) add('Clips', it.clips.length);
+    if (it.also_in?.length) add('Also in', [...new Set(it.also_in)].map(levelLabel).join(', '));
+    if (it.other_names?.length) add('Also named', [...new Set(it.other_names)].join(', '));
     add('Textures', it.textures); info.push('<dt>Materials</dt><dd id="dMaterials">…</dd>'); add('Size', fmtSize(it.size)); add('Source', it.source); add('File', it.path);
     view.show(it);
   } else {

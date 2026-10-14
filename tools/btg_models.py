@@ -7,7 +7,8 @@ Needs: Python 3.8+, numpy, Pillow  (pip install numpy pillow)
 Reads the .vol archives read-only, decompresses the BIGB level/entity files
 (.PCM = level, .PCS/.PCSI = entities), and writes glTF 2.0 (.gltf + .bin + PNG textures):
   <out>/levels/<level>.gltf      whole level geometry, world space
-  <out>/entities/<name>__<hash>.gltf   each entity mesh in bind pose, deduplicated
+  <out>/entities/<name>__<hash>.gltf   each entity mesh in bind pose, written once per game
+  <out>/entities.csv             every unique entity mesh with the levels/sources that use it
   <out>/index.csv                which source file produced what
 Format notes are in FORMAT_NOTES.md next to this script.
 """
@@ -140,7 +141,7 @@ class Pack:
     def batches(s):
         m=s.m
         for t,ps in s.O:
-            if t not in (0x20,0x21,0x22): continue
+            if t not in (0x20,0x21,0x22,0x26): continue  # 0x26: water surface batches
             b=ps[0]
             fvf=u32(m,b+4); vbo=u32(m,b+0xc); tex=u32(m,b+0x10); di=u32(m,b+0x38)
             prim,nv,pc,node=struct.unpack_from('<4I',m,di)
@@ -305,6 +306,76 @@ def volt_parse(path):
         out.append((d[p+16:d.index(b'\0',p+16)].decode('latin1'),a,c))
     return out
 
+def strip_key(raw,ix):
+    """Order-free hash of the triangles a strip draws: the same vertices (all attributes, byte for
+    byte) joined into the same triangles with the same winding, however the strip was laid out."""
+    ix=np.asarray(ix,dtype=np.int64)
+    if len(ix)<3: return hashlib.md5(b'').hexdigest()
+    rows=np.ascontiguousarray(raw[ix]).view(np.dtype((np.void,raw.shape[1]))).ravel()
+    uniq,inv=np.unique(rows,return_inverse=True); inv=inv.ravel()
+    a,b,c=inv[:-2],inv[1:-1],inv[2:]; odd=np.arange(len(a))%2==1
+    t=np.stack([np.where(odd,b,a),np.where(odd,a,b),c],1)
+    t=t[(t[:,0]!=t[:,1])&(t[:,1]!=t[:,2])&(t[:,0]!=t[:,2])]
+    k=t.argmin(1); t=np.stack([t[np.arange(len(t)),(k+i)%3] for i in range(3)],1)
+    t=np.unique(t,axis=0) if len(t) else t
+    return hashlib.md5(uniq.tobytes()+t.astype('<i4').tobytes()).hexdigest()
+
+def tex_hash(P,texobj,cache):
+    """Content hash of a texture, and of every layer and its scroll/rotate settings for an
+    animated one (type 0x07), so equal pixels match across packs."""
+    if texobj not in cache:
+        m=P.m; h=hashlib.md5(); objs=[texobj]
+        if P.start.get(texobj)==7:
+            n,lp=struct.unpack_from('<2I',m,texobj+0xc)
+            if 0<n<9 and lp+0x40*n<=len(m):
+                objs=[u32(m,lp+0x40*k) for k in range(n)]
+                for k in range(n): h.update(m[lp+0x40*k+4:lp+0x40*(k+1)])
+        for o in objs:
+            im=P.tga(o)
+            h.update(b'none' if im is None else im.tobytes()+im.mode.encode()+bytes(str(im.size),'ascii'))
+        cache[texobj]=h.hexdigest()
+    return cache[texobj]
+
+def mesh_key(P,batches,th):
+    """Fingerprint of what a mesh looks like: the triangles each strip draws (positions, normals,
+    colours, UVs; where the mesh sits in its vertex buffer and how the strip is ordered don't matter),
+    its textures' pixels, material colour and render/texture-stage/sampler states. Batches are
+    hashed one by one and sorted, so the same parts stored in another order still match, and the
+    node name is left out, so the same mesh under another name in another level is one file."""
+    m=P.m; keys=[]
+    for bt in batches:
+        h=hashlib.md5(); stride,raw,idx=P.vb(bt['vb']); ix=idx[bt['start']:bt['start']+bt['pc']+2]
+        h.update(struct.pack('<2I',stride,bt['fvf'])); h.update(strip_key(raw,ix).encode())
+        h.update(tex_hash(P,bt['tex'],th).encode()); h.update(m[bt['off']+0x14:bt['off']+0x18])
+        for o,size in ((0x1c,8),(0x24,12),(0x2c,12)):
+            c,p=struct.unpack_from('<2I',m,bt['off']+o)
+            if 0<c<64: h.update(m[p:p+size*c])
+            h.update(b'|')
+        keys.append(h.hexdigest())
+    return hashlib.md5(''.join(sorted(keys)).encode()).hexdigest()
+
+def write_usage(OUT,rows):
+    """entities.csv: one row per unique entity file with every level, source and name using it.
+    The same lists go into each file as asset.extras.btg {names, levels, sources}."""
+    use=collections.OrderedDict()
+    for r in rows:
+        if r.get('kind') not in ('entity','entity(dup)') or not r.get('output'): continue
+        u=use.setdefault(r['output'],dict(names=[],levels=[],sources=[],uses=0))
+        u['uses']+=1
+        lvl=r['source'].split('.')[0]
+        for k,v in (('names',r.get('name','')),('levels',lvl),('sources',r['source'])):
+            if v not in u[k]: u[k].append(v)
+    with open(os.path.join(OUT,'entities.csv'),'w',newline='') as fh:
+        w=csv.writer(fh); w.writerow(['output','name','other_names','uses','levels','sources'])
+        for o,u in use.items():
+            w.writerow([o,u['names'][0],';'.join(u['names'][1:]),u['uses'],';'.join(u['levels']),';'.join(u['sources'])])
+    for o,u in use.items():
+        fn=os.path.join(OUT,o)
+        if not os.path.exists(fn): continue
+        with open(fn) as fh: gl=json.load(fh)
+        gl['asset'].setdefault('extras',{})['btg']=dict(names=u['names'],levels=u['levels'],sources=u['sources'])
+        with open(fn,'w') as fh: json.dump(gl,fh)
+
 TITLES={}
 def packs(data_dir):
     for vf in sorted(glob.glob(os.path.join(data_dir,'*.vol'))):
@@ -334,16 +405,12 @@ def main():
             st=write_gltf(P,[(nm,b) for (n,nm),b in g.items()],lv,stem)
             rows.append(dict(source=base,kind='level',output='levels/%s.gltf'%stem,**(st or {})))
         else:
-            tc={}
+            tc={}; th={}
             for (n,nm),b in g.items():
-                # geometry fingerprint for dedupe across packs
-                h=hashlib.md5()
-                for bt in b:
-                    stride,raw,idx=P.vb(bt['vb']); h.update(idx[bt['start']:bt['start']+bt['pc']+2].tobytes()); h.update(raw[idx[bt['start']:bt['start']+bt['pc']+2]].tobytes())
-                key=(nm,h.hexdigest())
+                key=mesh_key(P,b,th)
                 if key in seen:
                     rows.append(dict(source=base,kind='entity(dup)',name=nm,output=seen[key])); continue
-                fn='%s__%s'%(safe(nm),h.hexdigest()[:6])
+                fn='%s__%s'%(safe(nm),key[:6])
                 st=write_gltf(P,[(nm,b)],lib,fn,tc)
                 if st is None: continue
                 seen[key]='entities/%s.gltf'%fn
@@ -353,6 +420,7 @@ def main():
     keys=['source','title','kind','name','output','nodes','batches','verts','tris','textures']
     with open(os.path.join(OUT,'index.csv'),'w',newline='') as fh:
         w=csv.DictWriter(fh,fieldnames=keys,extrasaction='ignore'); w.writeheader(); [w.writerow(r) for r in rows]
+    write_usage(OUT,rows)
     print('DONE')
 
 if __name__=='__main__':

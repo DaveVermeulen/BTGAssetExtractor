@@ -33,7 +33,7 @@ Byte-oriented LZ/RLE. Read control byte `c`:
 ### Relocation stream
 u32 list. A value with bit 31 set starts a group (`type = v & 0x7FFFFFFF`), following values are
 offsets in the main block that hold pointers (pointers are offsets into the main block).
-Group types seen: 0x01 texture, 0x07 animated (layered, scrolling) texture, 0x20/0x21/0x22 draw batch,
+Group types seen: 0x01 texture, 0x07 animated (layered, scrolling) texture, 0x20/0x21/0x22/0x26 draw batch,
 0x23/0x24 vertex+index buffer, 0x113 RIFF sound, 0x04 animation data, others not decoded.
 
 ## Geometry
@@ -42,11 +42,17 @@ Vertex/index buffer (types 0x23, 0x24):
 * stride 24: float xyz, u32 BGRA diffuse, float u, v      (batch FVF 0x142)
 * stride 32: float xyz, float normal xyz, float u, v       (batch FVF 0x112)
 
-Draw batch (types 0x20, 0x21, 0x22): `+0x04 FVF`, `+0x0C ptr vertex buffer`, `+0x10 ptr texture`,
+Draw batch (types 0x20, 0x21, 0x22, 0x26): `+0x04 FVF`, `+0x0C ptr vertex buffer`, `+0x10 ptr texture`,
 `+0x38 ptr drawInfo`. Between them is a D3D render-state list.
 drawInfo: `u32 primType(5 = triangle strip), u32 numVertices, u32 primCount, ptr node,
 float center[3], u32 0, u32 minIndex, u32 startIndex`. Indices are absolute; strip length = primCount+2.
 Node: name (char[16]) at `+0x20`, bounding sphere at `+0x10`.
+
+Type 0x26 is the same batch layout, used for water surfaces (160 batches in 22 levels, on nodes such as
+`WaterPlane`, `61 water`, `Fast_River_4011` and `ARENA_WATER`). 134 are alpha blended (SRCALPHA/INVSRCALPHA),
+10 additive and 16 opaque. Most use an animated texture: a static base, then up to two scrolling layers
+combined with BLENDTEXTUREALPHA, then the vertex colour (last stage MODULATE). Opacity comes from the base texture's alpha (about 36% for the 30-11 sea).
+Exports before 2026-10-14 skipped this type, so water had no surface and the bed showed through.
 
 Coordinates are D3D left-handed, Y up; the converter mirrors Z for glTF.
 Entity meshes are stored in bind pose / model space; level meshes in world space.

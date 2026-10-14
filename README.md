@@ -15,8 +15,8 @@ Blender.
 | Tool | Output |
 |---|---|
 | `tools/bionicle_extract.py` | ~2,770 textures (PNG), ~680 sounds and music tracks (16-bit WAV), the plain-text config files, and a `manifest.json` |
-| `tools/btg_models.py` | Every level as one glTF in world space (63 levels), plus ~2,650 unique entity meshes (characters, Rahi, masks, props, skydomes) in bind pose |
-| `tools/btg_rigged.py` | ~355 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…), one file per body variant, with skeleton, skin weights and animation clips (rotation, translation and root motion) |
+| `tools/btg_models.py` | Every level as one glTF in world space (63 levels), plus ~760 entity meshes (characters, Rahi, masks, props, skydomes) in bind pose, each written once for the whole game |
+| `tools/btg_rigged.py` | ~160 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…), one file per body variant, with skeleton, skin weights and animation clips (rotation, translation and root motion) |
 
 Counts are from the retail PC release; your numbers may differ slightly by version.
 
@@ -87,7 +87,8 @@ This writes:
 ```
 output/models/
   levels/<level>.gltf                  whole level geometry, e.g. 10-13.gltf is Ta-Koro
-  entities/<name>__<hash>.gltf         each entity mesh in bind pose, deduplicated
+  entities/<name>__<hash>.gltf         each entity mesh in bind pose, written once for the whole game
+  entities.csv                         every entity file with the levels and source files that use it
   index.csv                            which file inside the game archives produced what
 ```
 
@@ -106,6 +107,12 @@ output/models/
   characters/<name>__<hash>.gltf       mesh + skeleton + skin weights + animation clips
   characters.csv                       source file and bone, clip and mesh counts per character
 ```
+
+A mesh that appears in several levels is exported once. Two copies count as the same when they draw the
+same triangles with the same vertex data and texture pixels (plus blend states for entities and bone
+weights for characters); the node name doesn't matter. Each file lists every level and source that uses
+it in `asset.extras.btg` (`names`, `levels`, `sources`), and `entities.csv` / `characters.csv` hold the
+same mapping.
 
 ### 4. Browse everything
 
@@ -137,11 +144,13 @@ errors, so other glTF viewers work too.
 - [x] Sound effects, music, ambience and cutscene audio to WAV (~680)
 - [x] Plain-text config files from `general.vol` (level list, effects, controller maps)
 - [x] Level geometry in world space, one glTF per level (63 levels)
-- [x] Entity meshes in bind pose (~2,650: characters, Rahi, masks, props, skydomes)
-- [x] Rigged characters with skeleton and skin weights (~355), alternate body variants split into separate files
+- [x] Entity meshes in bind pose (~760: characters, Rahi, masks, props, skydomes)
+- [x] Rigged characters with skeleton and skin weights (~160), alternate body variants split into separate files
 - [x] Animation clips with bone rotations and translations, including root motion
 - [x] Transparency and blend modes (alpha blend, additive glow, alpha test) on every glTF material
 - [x] Animated textures: every layer exported, with its scroll, rotation and blend op in the material extras
+- [x] Water surfaces in every level that has water
+- [x] Duplicate models merged across the whole game, with a list of every level that uses each one
 
 ### To do
 

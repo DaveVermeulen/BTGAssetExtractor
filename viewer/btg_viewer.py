@@ -73,6 +73,12 @@ def gltf_info(path, root):
         'textures': len(g.get('images', [])),
         'clips': [a.get('name') or 'clip %d' % i for i, a in enumerate(g.get('animations', []))],
     }
+    # A model shared by several levels lists them all (the converter writes each unique mesh once).
+    btg = ((g.get('asset') or {}).get('extras') or {}).get('btg') or {}
+    if isinstance(btg, dict):
+        for k in ('names', 'levels', 'sources'):
+            v = btg.get(k)
+            if isinstance(v, list): info['shared_' + k] = [str(x) for x in v if x]
     return info, images
 
 
@@ -167,7 +173,7 @@ def build_index(root, log=print):
     cache_file = os.path.join(cache, 'index-cache.json')
     try:
         with open(cache_file, encoding='utf-8') as f: old = json.load(f)
-        if old.get('version') != 1: old = {}
+        if old.get('version') != 2: old = {}
     except (OSError, ValueError):
         old = {}
     old_models, new_models = old.get('models', {}), {}
@@ -199,9 +205,15 @@ def build_index(root, log=print):
         if row.get('kind') == 'level' and row.get('title'):
             levels.setdefault(name, row['title'])
         animated = bool(info['clips']) or info['bones'] > 0
+        info = dict(info)
+        shared_levels, shared_sources = info.pop('shared_levels', []), info.pop('shared_sources', [])
+        other_names = info.pop('shared_names', [])[1:]
+        level = level_of(row.get('source'), name if folder == 'levels' else '')
+        if shared_levels and level not in shared_levels: level = shared_levels[0]
         models.append(dict(info, path=r, images=[rel(i) for i in imgs], name=name.split('__')[0], id=name, folder=folder,
                            kind='animated' if animated else 'static',
-                           source=row.get('source', ''), level=level_of(row.get('source'), name if folder == 'levels' else ''),
+                           source=row.get('source', '') or (shared_sources[0] if shared_sources else ''),
+                           level=level, also_in=[l for l in shared_levels if l != level], other_names=other_names,
                            thumb=hashlib.sha1(('%s|%d|%d' % (r, st.st_size, int(st.st_mtime))).encode()).hexdigest()[:24]))
 
     for p in files:
@@ -233,7 +245,7 @@ def build_index(root, log=print):
     try:
         os.makedirs(cache, exist_ok=True)
         with open(cache_file + '.tmp', 'w', encoding='utf-8') as f:
-            json.dump({'version': 1, 'models': new_models}, f, separators=(',', ':'))
+            json.dump({'version': 2, 'models': new_models}, f, separators=(',', ':'))
         os.replace(cache_file + '.tmp', cache_file)
     except OSError as e:
         log('  could not write the index cache: %s' % e)

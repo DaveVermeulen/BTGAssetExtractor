@@ -61,7 +61,7 @@ def parse(path):
     return out
 
 # ==== export.py ====
-import sys,os,struct,json,io,collections
+import sys,os,struct,json,io,collections,hashlib
 import numpy as np
 from PIL import Image
 
@@ -139,6 +139,36 @@ def tex_layers(m,texobj,b):
     if n==1 and not any(out[0]['scroll']) and not out[0]['rotate']: return None
     return out
 
+def strip_key(raw,ix):
+    """Order-free hash of the triangles a strip draws: the same vertices (all attributes, byte for
+    byte) joined into the same triangles with the same winding, however the strip was laid out."""
+    ix=np.asarray(ix,dtype=np.int64)
+    if len(ix)<3: return hashlib.md5(b'').hexdigest()
+    rows=np.ascontiguousarray(raw[ix]).view(np.dtype((np.void,raw.shape[1]))).ravel()
+    uniq,inv=np.unique(rows,return_inverse=True); inv=inv.ravel()
+    a,b,c=inv[:-2],inv[1:-1],inv[2:]; odd=np.arange(len(a))%2==1
+    t=np.stack([np.where(odd,b,a),np.where(odd,a,b),c],1)
+    t=t[(t[:,0]!=t[:,1])&(t[:,1]!=t[:,2])&(t[:,0]!=t[:,2])]
+    k=t.argmin(1); t=np.stack([t[np.arange(len(t)),(k+i)%3] for i in range(3)],1)
+    t=np.unique(t,axis=0) if len(t) else t
+    return hashlib.md5(uniq.tobytes()+t.astype('<i4').tobytes()).hexdigest()
+
+def tex_hash(P,texobj,cache):
+    """Content hash of a texture, and of every layer and its scroll/rotate settings for an
+    animated one (type 0x07), so equal pixels match across packs."""
+    if texobj not in cache:
+        m=P.m; h=hashlib.md5(); objs=[texobj]
+        if P.start.get(texobj)==7:
+            n,lp=struct.unpack_from('<2I',m,texobj+0xc)
+            if 0<n<9 and lp+0x40*n<=len(m):
+                objs=[u32(m,lp+0x40*k) for k in range(n)]
+                for k in range(n): h.update(m[lp+0x40*k+4:lp+0x40*(k+1)])
+        for o in objs:
+            im=P.tga(o)
+            h.update(b'none' if im is None else im.tobytes()+im.mode.encode()+bytes(str(im.size),'ascii'))
+        cache[texobj]=h.hexdigest()
+    return cache[texobj]
+
 class Pack:
     def __init__(s,main,rel):
         s.m=main; s.O=objects(rel)
@@ -154,7 +184,7 @@ class Pack:
     def batches(s):
         m=s.m
         for t,ps in s.O:
-            if t not in (0x20,0x21,0x22): continue
+            if t not in (0x20,0x21,0x22,0x26): continue  # 0x26: water surface batches
             b=ps[0]
             fvf=u32(m,b+4); vbo=u32(m,b+0xc); tex=u32(m,b+0x10); di=u32(m,b+0x38)
             prim,nv,pc,node=struct.unpack_from('<4I',m,di)
@@ -358,7 +388,6 @@ def write_gltf(P,groups,outdir,name,texcache=None,skin=None,anims=None):
     stats['textures']=len(gl.get('images',[]))
     return stats
 
-
 # ==== skel.py ====
 import re,struct,os,sys
 PAT=re.compile(rb'\x00\x00\x00\x5a(....)\x00\x00\xff\x80\x04\x00\x5b\x00\x00\x00\x00\x5a(....)\x00\x00\xff\x80\x04\x00\x5c\x00',re.S)
@@ -560,7 +589,7 @@ def anim_writer(anims,bones,base_name):
     return f
 
 # ==== rigged.py ====
-import sys,os,glob,hashlib,re,collections,csv
+import sys,os,glob,hashlib,re,collections,csv,json
 
 def rigged_nodes(P):
     m=P.m
@@ -590,6 +619,9 @@ def assign(P,lib):
     return out,misses
 
 def skel_key(s): return tuple((b['name'],b['parent']) for b in s)
+
+def anim_hash(a):
+    return hashlib.md5(a['quats'].tobytes()+a['trans'].tobytes()+a['times'].tobytes()+a['channels'].tobytes()).hexdigest()
 
 def node_verts(P,b):
     """Unique vertex positions used by a mesh node's triangles."""
@@ -624,9 +656,6 @@ def split_variants(P,nodes,share=0.4):
     parts=[nodes[i] for i in range(len(nodes)) if i not in var]
     return [[nodes[i]]+parts for i in var]
 
-def anim_hash(a):
-    return hashlib.md5(a['quats'].tobytes()+a['trans'].tobytes()+a['times'].tobytes()+a['channels'].tobytes()).hexdigest()
-
 def run(packs,outdir):
     packs=list(packs)
     lib={}; libanims={}
@@ -636,17 +665,22 @@ def run(packs,outdir):
             for a in find_anims(m,h): libanims.setdefault(k,{}).setdefault(anim_hash(a),a)
     rows=[]; chars={}
     for base,m,rel in packs:
-        P=Pack(m,rel)
+        P=Pack(m,rel); th={}
         out,miss=assign(P,lib)
         for nm in miss: rows.append(dict(source=base,kind='unrigged',name=nm))
         for key,(s,allnodes) in out.items():
+            sk=skel_key(s)
             for nodes in split_variants(P,allnodes):
-                sk=skel_key(s)
-                h=hashlib.md5(repr(sk).encode())
+                # skeleton + every batch's triangles (with their bone weights) and texture pixels, in any order
+                parts=[]
                 for n,nm,b in nodes:
+                    jw=make_jw(P,n,nm,b,s)
                     for bt in b:
-                        st_,raw,idx=P.vb(bt['vb']); ix=idx[bt['start']:bt['start']+bt['pc']+2]; h.update(raw[ix].tobytes())
-                hd=h.hexdigest()
+                        st_,raw,idx=P.vb(bt['vb']); ix=idx[bt['start']:bt['start']+bt['pc']+2]
+                        used,loc=np.unique(ix,return_inverse=True); J,Wt=jw(bt,used)
+                        ext=np.hstack([raw[used],J.astype('<u2').view(np.uint8),Wt.astype('<f4').view(np.uint8)])
+                        parts.append(strip_key(ext,loc.ravel())+tex_hash(P,bt['tex'],th))
+                hd=hashlib.md5(repr(sk).encode()+''.join(sorted(parts)).encode()).hexdigest()
                 title=max(nodes,key=lambda x:sum(b['pc'] for b in x[2]))[1]
                 if hd in chars:
                     rows.append(dict(source=base,kind='character(dup)',name=title,hash=hd)); continue
@@ -667,6 +701,19 @@ def run(packs,outdir):
         print('wrote',fn,len(anims),flush=True)
     for r in rows:
         if r.get('hash') in done: r.update(done[r['hash']])
+    # every level/source that uses a character, stored in the file as asset.extras.btg
+    use=collections.OrderedDict()
+    for r in rows:
+        if r.get('output'):
+            u=use.setdefault(r['output'],dict(names=[],levels=[],sources=[]))
+            for k,v in (('names',r['name']),('levels',r['source'].split('_')[-1].split('.')[0]),('sources',r['source'])):
+                if v not in u[k]: u[k].append(v)
+    for o,u in use.items():
+        fn=os.path.join(outdir,os.path.basename(o))
+        if not os.path.exists(fn): continue
+        with open(fn) as fh: gl=json.load(fh)
+        gl['asset'].setdefault('extras',{})['btg']=u
+        with open(fn,'w') as fh: json.dump(gl,fh)
     return rows
 
 # ==== main ====
