@@ -203,7 +203,7 @@ def write_gltf(P,groups,outdir,name,texcache=None):
         if normalized: a['normalized']=True
         if minmax: a['min']=[float(x) for x in arr.min(0)]; a['max']=[float(x) for x in arr.max(0)]
         gl['accessors'].append(a); return len(gl['accessors'])-1
-    def material(tex,bs=None,valpha=False,boff=None):
+    def material(tex,bs=None,valpha=False,boff=None,vcol=False):
         if bs is not None and bs[0]=='alpha' and bs[4]>=1 and not valpha:
             im_mode=texcache[tex][1] if tex in texcache else None
             if tex not in texcache:
@@ -211,7 +211,7 @@ def write_gltf(P,groups,outdir,name,texcache=None):
                 im_mode='RGBA' if im is not None and im.mode in('RGBA','LA','PA','P') and 'A' in im.getbands() and im.getextrema()[-1][0]<255 else 'RGB'
             if im_mode!='RGBA': bs=None   # blend state set, but nothing is see-through: keep it opaque
         layers=tex_layers(P.m,tex,boff) if boff is not None and P.start.get(tex)==7 else None
-        key=(tex,bs if bs and bs[0]!='opaque' else None,tuple(l['op'] for l in layers) if layers else None)
+        key=(tex,bs if bs and bs[0]!='opaque' else None,tuple(l['op'] for l in layers) if layers else None,vcol)
         if key in texmap: return texmap[key]
         if tex not in texcache:
             im=P.tga(tex) if tex!=0xffffffff else None
@@ -235,7 +235,9 @@ def write_gltf(P,groups,outdir,name,texcache=None):
             if mode=='cutout': mat['alphaMode']='MASK'; mat['alphaCutoff']=0.5
             else:
                 mat['alphaMode']='BLEND'
-                if alpha<1: mat['pbrMetallicRoughness']['baseColorFactor']=[1.0,1.0,1.0,alpha]
+                # The game copies the material alpha into every vertex colour (checked on all 1,298
+                # such batches), so only meshes without vertex colours need it as a factor.
+                if alpha<1 and not vcol: mat['pbrMetallicRoughness']['baseColorFactor']=[1.0,1.0,1.0,alpha]
             mat['extras']=dict(btg=dict(blend=mode,depthWrite=zw,srcBlend=src,dstBlend=dst))
         if layers:
             for l in layers:
@@ -280,7 +282,7 @@ def write_gltf(P,groups,outdir,name,texcache=None):
             attrs['TEXCOORD_0']=add_acc(np.ascontiguousarray(uv,dtype='<f4'),5126,'VEC2',34962)
             tri=inv.reshape(-1,3)[:,[0,2,1]].astype('<u4')  # flip winding for Z mirror
             ia=add_acc(tri.reshape(-1),5125,'SCALAR',34963)
-            prims.append(dict(attributes=attrs,indices=ia,material=material(bt['tex'],bt.get('bs'),bool(stride==24 and (v[:,15]<255).any()),bt['off'])))
+            prims.append(dict(attributes=attrs,indices=ia,material=material(bt['tex'],bt.get('bs'),bool(stride==24 and (v[:,15]<255).any()),bt['off'],stride==24)))
             stats['tris']+=len(tri); stats['verts']+=len(pos); stats['batches']+=1
         if not prims: continue
         gl['meshes'].append(dict(name=nm,primitives=prims))
