@@ -16,7 +16,7 @@ Blender.
 |---|---|
 | `tools/bionicle_extract.py` | ~2,770 textures (PNG), ~680 sounds and music tracks (16-bit WAV), the plain-text config files, and a `manifest.json` |
 | `tools/btg_models.py` | Every level as one glTF in world space (63 levels), plus ~760 entity meshes (characters, Rahi, masks, props, skydomes) in bind pose, each written once for the whole game |
-| `tools/btg_rigged.py` | ~160 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…), one file per body variant, with skeleton, skin weights and animation clips (rotation, translation and root motion) |
+| `tools/btg_rigged.py` | ~170 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…), one file per body variant, with skeleton, skin weights and animation clips (rotation, translation and root motion) |
 
 Counts are from the retail PC release; your numbers may differ slightly by version.
 
@@ -88,7 +88,7 @@ This writes:
 output/models/
   levels/<level>.gltf                  whole level geometry, e.g. 10-13.gltf is Ta-Koro
   entities/<name>__<hash>.gltf         each entity mesh in bind pose, written once for the whole game
-  entities.csv                         every entity file with the levels and source files that use it
+  entities.csv                         every entity file with the levels and source files that use it, and its near-duplicate group
   index.csv                            which file inside the game archives produced what
 ```
 
@@ -105,7 +105,7 @@ This writes:
 ```
 output/models/
   characters/<name>__<hash>.gltf       mesh + skeleton + skin weights + animation clips
-  characters.csv                       source file and bone, clip and mesh counts per character
+  characters.csv                       source file, near-duplicate group and bone, clip and mesh counts per character
 ```
 
 A mesh that appears in several levels is exported once. Two copies count as the same when they draw the
@@ -113,6 +113,14 @@ same triangles with the same vertex data and texture pixels (plus blend states f
 weights for characters); the node name doesn't matter. Each file lists every level and source that uses
 it in `asset.extras.btg` (`names`, `levels`, `sources`), and `entities.csv` / `characters.csv` hold the
 same mapping.
+
+Files that are versions of one model are grouped, such as the same Rahi in two levels with a slightly
+different mesh. Files share a `body` when at least 80% of each one's vertices lie within 1% of the model
+size of the other's; for characters, their skeletons must also share most bone names. One body can carry
+several characters (all Matoran, the Bohrok kinds, the Turaga), so each body is split by the mean colour
+of its textures into `group`s, one per character. Both are columns of `entities.csv` and
+`characters.csv` (with `group_size` and `body_size`) and keys of `asset.extras.btg`, where `variants`
+lists the other files in the same group.
 
 ### 4. Browse everything
 
@@ -145,7 +153,8 @@ errors, so other glTF viewers work too.
 - [x] Plain-text config files from `general.vol` (level list, effects, controller maps)
 - [x] Level geometry in world space, one glTF per level (63 levels)
 - [x] Entity meshes in bind pose (~760: characters, Rahi, masks, props, skydomes)
-- [x] Rigged characters with skeleton and skin weights (~160), alternate body variants split into separate files
+- [x] Rigged characters with skeleton and skin weights (~170), alternate body variants split into separate files
+- [x] Near-duplicate characters and entity meshes grouped as versions of one model
 - [x] Animation clips with bone rotations and translations, including root motion
 - [x] Transparency and blend modes (alpha blend, additive glow, alpha test) on every glTF material
 - [x] Animated textures: every layer exported, with its scroll, rotation and blend op in the material extras
@@ -157,8 +166,7 @@ errors, so other glTF viewers work too.
 - [ ] **Cutscene cameras**: export the animated camera rigs that go with the cutscene clips
 - [ ] **Game text**: UI, help text, objectives and credits in all six languages
 - [ ] **Collision meshes** for each level
-- [ ] **Remaining skinned parts**: about 90 that no skeleton is matched to yet
-- [ ] **Near-duplicate characters**: group variants of the same model
+- [ ] **Remaining skinned parts**: about a dozen rigid props (doors, iris panels, `Line10`, `little plank`, the closing-cutscene planets) that no skeleton fits yet; they are exported as static entities
 - [ ] **Level entity placement**: where each creature, pickup and prop sits in a level
 - [ ] **Level scripts, particles, fog and sky settings**
 

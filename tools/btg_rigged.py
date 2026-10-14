@@ -619,7 +619,17 @@ def assign(P,lib):
         consider(pre)
         if not best or best[0]>=0.2*size: consider([(('L',h),s) for h,s in local.items()])
         if not best or best[0]>=0.2*size: consider([(('G',k),s) for k,s in lib.items()])
-        if best and best[0]<0.2*size:
+        if best and best[0]>=0.2*size:
+            # `size` above is the extent of the first vertex buffer only, which for a creature split
+            # into many small buffers (Ruki, Kane-ra, Nui-Rama, the whale sub) is a few centimetres. Judge
+            # the best fit found against the extent of the whole mesh instead, but only for a skeleton
+            # from this pack or one with a bone named after the mesh (which may sit a little further
+            # off): unnamed skeletons from other packs then fit props such as doors to camera rigs.
+            V=node_verts(P,b); full=float(np.ptp(V,axis=0).max()) if len(V) else 0.0
+            named=any(x['name'][:15]==nm[:15] for x in best[2])
+            ok=(named or best[1][0]=='L') and best[0]<(0.35 if named else 0.2)*full
+        else: ok=best is not None
+        if ok:
             out.setdefault(best[1],(best[2],[]))[1].append((n,nm,b))
         else: misses.append(nm)
     return out,misses
@@ -661,6 +671,71 @@ def split_variants(P,nodes,share=0.4):
     if not var: return [nodes]
     parts=[nodes[i] for i in range(len(nodes)) if i not in var]
     return [[nodes[i]]+parts for i in var]
+
+def tex_colour(P,texobjs,cache):
+    """Mean RGB (0..1) of a model's textures, weighted by pixel count."""
+    tot=np.zeros(3); n=0
+    for t in set(texobjs):
+        if t not in cache:
+            im=P.tga(t) if t!=0xffffffff else None
+            cache[t]=None if im is None else (np.asarray(im.convert('RGB'),np.float64).reshape(-1,3).sum(0)/255.0,im.size[0]*im.size[1])
+        if cache[t] is not None: tot+=cache[t][0]; n+=cache[t][1]
+    return tot/n if n else None
+
+def colour_dist(a,b,tol=0.13,ltol=0.15):
+    """Colour difference scaled so that under 1 means the same colour scheme: chromaticity (r,g,b over
+    their sum) within `tol` and brightness within `ltol`."""
+    if a is None or b is None: return 0.0 if a is None and b is None else 9.0
+    ca=a/max(a.sum(),1e-6); cb=b/max(b.sum(),1e-6)
+    return max(np.linalg.norm(ca-cb)/tol,abs(a.mean()-b.mean())/ltol)
+
+def colour_groups(keys,col):
+    """Splits keys into sets whose colours are all close to each other: complete-linkage clustering,
+    so a run of in-between colours can't chain green to yellow to white. Only groups of 2 or more."""
+    out=[[k] for k in keys]
+    while True:
+        best=None
+        for i in range(len(out)):
+            for j in range(i+1,len(out)):
+                d=max(colour_dist(col[a],col[c]) for a in out[i] for c in out[j])
+                if d<1 and (best is None or d<best[0]): best=(d,i,j)
+        if best is None: break
+        _,i,j=best; out[i]+=out.pop(j)
+    return sorted((sorted(g) for g in out if len(g)>1),key=len,reverse=True)
+
+def union_groups(keys,same):
+    """Connected components of `same` over `keys` (single linkage); only groups of 2 or more."""
+    parent={k:k for k in keys}
+    def root(k):
+        while parent[k]!=k: parent[k]=parent[parent[k]]; k=parent[k]
+        return k
+    for i,a in enumerate(keys):
+        for c in keys[i+1:]:
+            if root(a)!=root(c) and same(a,c): parent[root(c)]=root(a)
+    groups=collections.defaultdict(list)
+    for k in keys: groups[root(k)].append(k)
+    return sorted((g for g in groups.values() if len(g)>1),key=len,reverse=True)
+
+def near_groups(chars,share=0.8,bones=0.8):
+    """Groups outputs that are versions of one model. A body group shares a rig and mesh: the
+    skeletons share >= `bones` of their bone names and >= `share` of each one's bind-pose vertices lie
+    within 1% of the model size of the other's. That also joins different characters built on one body
+    (the Matoran tribes, Bohrok kinds, Toa Nuva), so each body group is split by the mean colour of its
+    textures into character groups. Returns [(body, [groups])], largest body first."""
+    keys=list(chars); info={}; tc={}
+    for hd in keys:
+        P,nodes,s,sk,title=chars[hd]
+        V=[node_verts(P,b) for n,nm,b in nodes]; V=np.concatenate(V) if V else np.zeros((0,3),np.float32)
+        ext=float(np.ptp(V,axis=0).max()) if len(V) else 0.0
+        col=tex_colour(P,[bt['tex'] for n,nm,b in nodes for bt in b],tc.setdefault(id(P),{}))
+        info[hd]=(V,ext,{b['name'] for b in s},col)
+    def body(a,c):
+        Va,ea,ba,_=info[a]; Vc,ec,bc,_=info[c]
+        if not len(Va) or not len(Vc) or min(ea,ec)<0.8*max(ea,ec): return False
+        if len(ba&bc)<bones*max(len(ba),len(bc)): return False
+        tol=max(0.01*max(ea,ec),1e-4)
+        return near_frac(Va,Vc,tol)>=share and near_frac(Vc,Va,tol)>=share
+    return [(g,colour_groups(g,{k:info[k][3] for k in g})) for g in union_groups(keys,body)]
 
 def run(packs,outdir):
     packs=list(packs)
@@ -705,6 +780,17 @@ def run(packs,outdir):
         st=write_gltf(P,jws,outdir,fn,{},skin=dict(bones=s,world=worlds(s)),anims=anim_writer(anims,s,fn))
         if st: done[hd]=dict(output='characters/%s.gltf'%fn,bones=len(s),anims=len(anims),meshes=';'.join(x[1] for x in nodes),**st)
         print('wrote',fn,len(anims),flush=True)
+    # near-duplicates: a body (shared rig and mesh) and, within it, a group (same colours too), each
+    # named after the title most of its members carry
+    def gid(g,kind,i):
+        nm=collections.Counter(chars[hd][4] for hd in g).most_common(1)[0][0]
+        return '%s__%s%03d'%(re.sub(r'[^A-Za-z0-9._-]+','_',nm).strip('_') or 'unnamed',kind,i)
+    gi=0
+    for bi,(bd,gs) in enumerate(near_groups({hd:chars[hd] for hd in chars if hd in done})):
+        for hd in bd: done[hd].update(body=gid(bd,'b',bi+1),body_size=len(bd))
+        for g in gs:
+            gi+=1
+            for hd in g: done[hd].update(group=gid(g,'g',gi),group_size=len(g))
     for r in rows:
         if r.get('hash') in done: r.update(done[r['hash']])
     # every level/source that uses a character, stored in the file as asset.extras.btg
@@ -712,6 +798,10 @@ def run(packs,outdir):
     for r in rows:
         if r.get('output'):
             u=use.setdefault(r['output'],dict(names=[],levels=[],sources=[]))
+            if r.get('body'): u['body']=r['body']
+            if r.get('group'):
+                u['group']=r['group']
+                u['variants']=sorted(d['output'] for d in done.values() if d.get('group')==r['group'] and d['output']!=r['output'])
             for k,v in (('names',r['name']),('levels',r['source'].split('_')[-1].split('.')[0]),('sources',r['source'])):
                 if v not in u[k]: u[k].append(v)
     for o,u in use.items():
@@ -740,7 +830,7 @@ def main():
     if len(sys.argv)!=3: print(__doc__); sys.exit(1)
     data,out=sys.argv[1],sys.argv[2]
     rows=run(packs(data),os.path.join(out,'characters'))
-    keys=['source','kind','name','output','bones','anims','meshes','nodes','batches','verts','tris','textures']
+    keys=['source','kind','name','output','group','group_size','body','body_size','bones','anims','meshes','nodes','batches','verts','tris','textures']
     with open(os.path.join(out,'characters.csv'),'w',newline='') as fh:
         w=csv.DictWriter(fh,fieldnames=keys,extrasaction='ignore'); w.writeheader(); [w.writerow(r) for r in rows]
     print('done:',len(rows),'outputs')

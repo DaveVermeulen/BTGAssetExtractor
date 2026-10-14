@@ -69,7 +69,12 @@ World matrices are the product of locals from the root down. A few bones have a 
 table; the exporter hangs those under a synthetic `Armature` root.
 Script-like byte patterns in the pack link a mesh node to its skeleton; when the link is missing the exporter
 tries every skeleton in the pack, then every skeleton in the game, and keeps the one whose bind pose fits the
-vertices best.
+vertices best. A fit counts when the median distance from each bone's vertices to that bone is under 20% of
+the mesh size. Many Rahi (Ruki, Kane-ra, Nui-Rama, the whale sub, the Fikou spider) are split into dozens of
+small vertex buffers, so the size has to be taken over the whole mesh, not one buffer; that wider check only
+accepts a skeleton from the same pack, or one with a bone named after the mesh (then up to 35%), because
+unnamed skeletons from other packs fit rigid props to camera and platform rigs. About a dozen rigid props
+(doors, iris panels, `Line10`, `little plank`, the closing-cutscene planets) still fit no skeleton.
 
 ## Skin weights
 Smooth-skinned meshes have a separate stream of 48-byte records (one per vertex) carrying bone indices and

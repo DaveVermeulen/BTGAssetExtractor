@@ -360,9 +360,89 @@ def mesh_key(P,batches,th):
         keys.append(h.hexdigest())
     return hashlib.md5(''.join(sorted(keys)).encode()).hexdigest()
 
-def write_usage(OUT,rows):
+def mesh_verts(P,batches):
+    """Unique vertex positions used by a mesh's triangles."""
+    out=[]
+    for bt in batches:
+        st_,raw,idx=P.vb(bt['vb']); ix=idx[bt['start']:bt['start']+bt['pc']+2]
+        if len(ix)<3 or ix.max()>=len(raw): continue
+        out.append(raw[np.unique(ix),:12].copy().view('<f4').reshape(-1,3))
+    return np.unique(np.concatenate(out),axis=0) if out else np.zeros((0,3),np.float32)
+
+def near_frac(A,B,tol):
+    """Fraction of points in A that lie within tol of some point in B."""
+    if not len(A) or not len(B): return 0.0
+    cells=set(map(tuple,np.floor(B/tol).astype(np.int64)))
+    g=np.floor(A/tol).astype(np.int64); hit=0
+    for c in map(tuple,g):
+        hit+=any((c[0]+x,c[1]+y,c[2]+z) in cells for x in(-1,0,1) for y in(-1,0,1) for z in(-1,0,1))
+    return hit/len(A)
+
+def tex_colour(P,texobjs,cache):
+    """Mean RGB (0..1) of a model's textures, weighted by pixel count."""
+    tot=np.zeros(3); n=0
+    for t in set(texobjs):
+        if t not in cache:
+            im=P.tga(t) if t!=0xffffffff else None
+            cache[t]=None if im is None else (np.asarray(im.convert('RGB'),np.float64).reshape(-1,3).sum(0)/255.0,im.size[0]*im.size[1])
+        if cache[t] is not None: tot+=cache[t][0]; n+=cache[t][1]
+    return tot/n if n else None
+
+def colour_dist(a,b,tol=0.13,ltol=0.15):
+    """Colour difference scaled so that under 1 means the same colour scheme: chromaticity (r,g,b over
+    their sum) within `tol` and brightness within `ltol`."""
+    if a is None or b is None: return 0.0 if a is None and b is None else 9.0
+    ca=a/max(a.sum(),1e-6); cb=b/max(b.sum(),1e-6)
+    return max(np.linalg.norm(ca-cb)/tol,abs(a.mean()-b.mean())/ltol)
+
+def colour_groups(keys,col):
+    """Splits keys into sets whose colours are all close to each other: complete-linkage clustering,
+    so a run of in-between colours can't chain green to yellow to white. Only groups of 2 or more."""
+    out=[[k] for k in keys]
+    while True:
+        best=None
+        for i in range(len(out)):
+            for j in range(i+1,len(out)):
+                d=max(colour_dist(col[a],col[c]) for a in out[i] for c in out[j])
+                if d<1 and (best is None or d<best[0]): best=(d,i,j)
+        if best is None: break
+        _,i,j=best; out[i]+=out.pop(j)
+    return sorted((sorted(g) for g in out if len(g)>1),key=len,reverse=True)
+
+def union_groups(keys,same,limit=None):
+    """Connected components of `same` over `keys` (single linkage); only groups of 2 or more.
+    With `limit(a,c)`, keys must be sorted so that once it is true for c it is for every later c."""
+    parent={k:k for k in keys}
+    def root(k):
+        while parent[k]!=k: parent[k]=parent[parent[k]]; k=parent[k]
+        return k
+    for i,a in enumerate(keys):
+        for c in keys[i+1:]:
+            if limit and limit(a,c): break
+            if root(a)!=root(c) and same(a,c): parent[root(c)]=root(a)
+    groups=collections.defaultdict(list)
+    for k in keys: groups[root(k)].append(k)
+    return sorted((sorted(g) for g in groups.values() if len(g)>1),key=len,reverse=True)
+
+def near_groups(info,share=0.8):
+    """Groups entity files that are versions of one mesh. A body group has the same shape: >= `share`
+    of each one's vertices lie within 1% of the model size of the other's (only meshes whose vertex
+    counts and sizes are within 20% are compared). Different models on one body (the Turaga, the
+    Matoran tribes) are then told apart by the mean colour of their textures. `info` maps output ->
+    (vertex positions, mean colour); returns [(body, [groups])], largest body first."""
+    keys=sorted((k for k in info if len(info[k][0])),key=lambda k:len(info[k][0]))
+    ext={k:float(np.ptp(info[k][0],axis=0).max()) for k in keys}
+    def body(a,c):
+        if min(ext[a],ext[c])<0.8*max(ext[a],ext[c]): return False
+        tol=max(0.01*max(ext[a],ext[c]),1e-4)
+        return near_frac(info[a][0],info[c][0],tol)>=share and near_frac(info[c][0],info[a][0],tol)>=share
+    bodies=union_groups(keys,body,lambda a,c:len(info[c][0])>1.2*len(info[a][0]))
+    return [(g,colour_groups(g,{k:info[k][1] for k in g})) for g in bodies]
+
+def write_usage(OUT,rows,verts=None):
     """entities.csv: one row per unique entity file with every level, source and name using it.
-    The same lists go into each file as asset.extras.btg {names, levels, sources}."""
+    The same lists go into each file as asset.extras.btg {names, levels, sources}, plus {group,
+    variants, body} for files that are near-duplicates of others (see near_groups)."""
     use=collections.OrderedDict()
     for r in rows:
         if r.get('kind') not in ('entity','entity(dup)') or not r.get('output'): continue
@@ -371,15 +451,28 @@ def write_usage(OUT,rows):
         lvl=r['source'].split('.')[0]
         for k,v in (('names',r.get('name','')),('levels',lvl),('sources',r['source'])):
             if v not in u[k]: u[k].append(v)
+    def gid(g,kind,i):
+        nm=collections.Counter(use[o]['names'][0] for o in g).most_common(1)[0][0]
+        return '%s__%s%03d'%(re.sub(r'[^A-Za-z0-9._-]+','_',nm).strip('_') or 'unnamed',kind,i)
+    group={}; body={}; gi=0
+    for bi,(bd,gs) in enumerate(near_groups({o:verts[o] for o in use if o in verts} if verts else {})):
+        for o in bd: body[o]=(gid(bd,'b',bi+1),bd)
+        for g in gs:
+            gi+=1
+            for o in g: group[o]=(gid(g,'g',gi),g)
     with open(os.path.join(OUT,'entities.csv'),'w',newline='') as fh:
-        w=csv.writer(fh); w.writerow(['output','name','other_names','uses','levels','sources'])
+        w=csv.writer(fh); w.writerow(['output','name','other_names','uses','levels','sources','group','group_size','body','body_size'])
         for o,u in use.items():
-            w.writerow([o,u['names'][0],';'.join(u['names'][1:]),u['uses'],';'.join(u['levels']),';'.join(u['sources'])])
+            g,gs=group.get(o,('',[])); b,bs=body.get(o,('',[]))
+            w.writerow([o,u['names'][0],';'.join(u['names'][1:]),u['uses'],';'.join(u['levels']),';'.join(u['sources']),g,len(gs) or '',b,len(bs) or ''])
     for o,u in use.items():
         fn=os.path.join(OUT,o)
         if not os.path.exists(fn): continue
         with open(fn) as fh: gl=json.load(fh)
         gl['asset'].setdefault('extras',{})['btg']=dict(names=u['names'],levels=u['levels'],sources=u['sources'])
+        if o in body: gl['asset']['extras']['btg']['body']=body[o][0]
+        if o in group:
+            g,gs=group[o]; gl['asset']['extras']['btg'].update(group=g,variants=[x for x in gs if x!=o])
         with open(fn,'w') as fh: json.dump(gl,fh)
 
 TITLES={}
@@ -400,7 +493,7 @@ def main():
     DATA,OUT=sys.argv[1],sys.argv[2]
     lv=os.path.join(OUT,'levels'); lib=os.path.join(OUT,'entities')
     os.makedirs(lv,exist_ok=True); os.makedirs(lib,exist_ok=True)
-    rows=[]; seen={}; libtex={}
+    rows=[]; seen={}; libtex={}; verts={}
     def safe(s): return re.sub(r'[^A-Za-z0-9._-]+','_',s).strip('_') or 'unnamed'
     for base,main,rel in packs(DATA):
         stem,ext=base.split('.')
@@ -411,7 +504,7 @@ def main():
             st=write_gltf(P,[(nm,b) for (n,nm),b in g.items()],lv,stem)
             rows.append(dict(source=base,kind='level',output='levels/%s.gltf'%stem,**(st or {})))
         else:
-            tc={}; th={}
+            tc={}; th={}; th_col={}
             for (n,nm),b in g.items():
                 key=mesh_key(P,b,th)
                 if key in seen:
@@ -419,14 +512,14 @@ def main():
                 fn='%s__%s'%(safe(nm),key[:6])
                 st=write_gltf(P,[(nm,b)],lib,fn,tc)
                 if st is None: continue
-                seen[key]='entities/%s.gltf'%fn
+                seen[key]='entities/%s.gltf'%fn; verts[seen[key]]=(mesh_verts(P,b),tex_colour(P,[bt['tex'] for bt in b],th_col))
                 rows.append(dict(source=base,kind='entity',name=nm,output=seen[key],**st))
         print(base,flush=True)
     for r in rows: r['title']=TITLES.get(r['source'],'')
     keys=['source','title','kind','name','output','nodes','batches','verts','tris','textures']
     with open(os.path.join(OUT,'index.csv'),'w',newline='') as fh:
         w=csv.DictWriter(fh,fieldnames=keys,extrasaction='ignore'); w.writeheader(); [w.writerow(r) for r in rows]
-    write_usage(OUT,rows)
+    write_usage(OUT,rows,verts)
     print('DONE')
 
 if __name__=='__main__':
