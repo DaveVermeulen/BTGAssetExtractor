@@ -2,7 +2,7 @@
 
 A browser-based viewer for the files the extractor tools write. It has four tabs:
 
-* **Static meshes**: entity meshes and whole levels, with rendered thumbnails. Click one to orbit, zoom and toggle wireframe.
+* **Static meshes**: entity meshes and whole levels, with rendered thumbnails. Click one to orbit, zoom and switch the display between textured, wireframe on grey and wireframe lines only.
 * **Animated meshes**: rigged characters. Pick any animation clip, play, pause, change speed, scrub the timeline,
   show the skeleton, or turn on *Follow* to keep the camera on characters whose clips move them across the level.
 * **Textures**: every PNG in a grid. Click one for a large view with zoom, background and alpha options.

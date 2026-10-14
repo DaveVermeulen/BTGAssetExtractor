@@ -462,12 +462,21 @@ const thumbs = (() => {
 })();
 
 // ---------------------------------------------------------------- detail view
+const WIRE_MODES = { off: 'Textured', grey: 'Wireframe on grey', lines: 'Wireframe lines only' };
+const wireMats = {
+  // Flat shaded because level meshes carry no normals (their lighting is baked into vertex colours).
+  // Pushed back slightly so the overlay lines win the depth test.
+  grey: new THREE.MeshLambertMaterial({ color: 0x7d828b, emissive: 0x3c4048, flatShading: true, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
+  overlay: new THREE.MeshBasicMaterial({ color: 0x1b1e24, wireframe: true, transparent: true, opacity: 0.45, depthWrite: false }),
+  lines: new THREE.MeshBasicMaterial({ color: 0x9fb4d0, wireframe: true, side: THREE.DoubleSide }),
+};
 const view = (() => {
   const canvas = $('#view3d');
   let renderer = null, scene, camera, controls, clock = new THREE.Clock();
   let current = null, mixer = null, action = null, clips = [], grid = null, skel = null, followBone = null, lastFollow = new THREE.Vector3();
-  const opts = { wire: false, grid: true, skel: false, follow: true, speed: 1, playing: true, transparency: 'file', cam: 'orbit', texanim: true };
+  const opts = { wire: 'off', grid: true, skel: false, follow: true, speed: 1, playing: true, transparency: 'file', cam: 'orbit', texanim: true };
   try { if (localStorage.getItem('btgCam') === 'fly') opts.cam = 'fly'; } catch {}
+  try { const w = localStorage.getItem('btgWire'); if (WIRE_MODES[w]) opts.wire = w; } catch {}
   // Fly camera: WASD to move, Q/E down/up, Shift faster, drag to look, wheel to change speed.
   const fly = { yaw: 0, pitch: 0, keys: new Set(), mult: 1, base: 1, drag: null };
   const FLY_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'ShiftLeft', 'ShiftRight']);
@@ -561,7 +570,10 @@ const view = (() => {
     fly.keys.clear();
   }
   function clear() {
-    if (current) { scene.remove(current); disposeTree(current); current = null; }
+    if (current) {
+      const wire = opts.wire; opts.wire = 'off'; applyWire(); opts.wire = wire; // put the real materials back so they get disposed
+      scene.remove(current); disposeTree(current); current = null;
+    }
     if (skel) { scene.remove(skel); skel.dispose(); skel = null; }
     if (grid) { scene.remove(grid); grid.dispose(); grid = null; }
     mixer = null; action = null; clips = []; followBone = null; texLayers = 0;
@@ -612,18 +624,39 @@ const view = (() => {
     if (grid) grid.position.set(sphere.center.x, box.min.y, sphere.center.z);
     if (followBone) lastFollow.copy(followBone.getWorldPosition(new THREE.Vector3()));
   }
-  function applyWire() { current?.traverse((o) => { if (o.isMesh) for (const m of [].concat(o.material)) m.wireframe = opts.wire; }); }
+  // Wireframe modes swap each mesh's materials for plain ones, so textures don't hide the lines.
+  // 'grey': flat grey surfaces with dark lines drawn by an overlay mesh that shares the geometry
+  // (and skeleton, so it follows animations); 'lines': light lines only, no surfaces.
+  function applyWire() {
+    if (!current) return;
+    const meshes = [];
+    current.traverse((o) => { if (o.isMesh && !o.userData._wireOverlay) meshes.push(o); });
+    for (const o of meshes) {
+      if (o.userData._wire) { o.remove(o.userData._wire); o.userData._wire = null; }
+      if (o.userData._origMat) { o.material = o.userData._origMat; o.userData._origMat = null; }
+      if (opts.wire === 'off') continue;
+      o.userData._origMat = o.material;
+      o.material = opts.wire === 'grey' ? wireMats.grey : wireMats.lines;
+      if (opts.wire !== 'grey') continue;
+      const w = o.isSkinnedMesh ? new THREE.SkinnedMesh(o.geometry, wireMats.overlay) : new THREE.Mesh(o.geometry, wireMats.overlay);
+      if (o.isSkinnedMesh) w.bind(o.skeleton, o.bindMatrix);
+      if (o.morphTargetInfluences) { w.morphTargetInfluences = o.morphTargetInfluences; w.morphTargetDictionary = o.morphTargetDictionary; }
+      w.frustumCulled = false; w.userData._wireOverlay = true; w.raycast = () => {};
+      o.add(w); o.userData._wire = w;
+    }
+  }
 
   function buildControls(it) {
     const c = $('#dControls');
     const tg = (k, label) => `<button class="toggle ${opts[k] ? 'on' : ''}" data-k="${k}">${label}</button>`;
-    let html = `<div class="row">${tg('wire', 'Wireframe')}${tg('grid', 'Grid')}${texLayers ? tg('texanim', 'Animate textures') : ''}${skel ? tg('skel', 'Skeleton') : ''}${clips.length ? tg('follow', 'Follow') : ''}<button class="toggle" id="resetView">Reset view</button></div>
+    let html = `<div class="row">${tg('grid', 'Grid')}${texLayers ? tg('texanim', 'Animate textures') : ''}${skel ? tg('skel', 'Skeleton') : ''}${clips.length ? tg('follow', 'Follow') : ''}<button class="toggle" id="resetView">Reset view</button></div>
       <div><label>Camera</label><div class="row">
         <button class="toggle ${opts.cam === 'orbit' ? 'on' : ''}" data-cam="orbit">Orbit</button>
         <button class="toggle ${opts.cam === 'fly' ? 'on' : ''}" data-cam="fly">Fly (WASD)</button>
         <span id="flyInfo" class="hint" ${opts.cam === 'fly' ? '' : 'hidden'}>Speed <b id="flySpeed">×${fly.mult.toFixed(2)}</b></span></div>
         <p class="hint" id="flyHelp" ${opts.cam === 'fly' ? '' : 'hidden'}>W A S D move · Q / E down / up · hold Shift to go faster · drag to look around · mouse wheel changes speed</p>
       </div>
+      <div><label>Display</label><select id="wireSel">${Object.entries(WIRE_MODES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('')}</select></div>
       <div><label>Transparency</label><select id="transSel">
         <option value="file">As stored in the file</option><option value="cutout">Texture alpha as cutout</option><option value="off">Off (all opaque)</option>
       </select></div>`;
@@ -637,7 +670,7 @@ const view = (() => {
     c.innerHTML = html;
     c.querySelectorAll('[data-k]').forEach((b) => b.onclick = () => {
       const k = b.dataset.k; opts[k] = !opts[k]; b.classList.toggle('on', opts[k]);
-      if (k === 'wire') applyWire(); if (k === 'grid' && grid) grid.visible = opts.grid; if (k === 'skel' && skel) skel.visible = opts.skel;
+      if (k === 'grid' && grid) grid.visible = opts.grid; if (k === 'skel' && skel) skel.visible = opts.skel;
       if (k === 'follow' && followBone) lastFollow.copy(followBone.getWorldPosition(new THREE.Vector3()));
     });
     $('#resetView').onclick = reset;
@@ -647,8 +680,14 @@ const view = (() => {
       $('#flyInfo').hidden = $('#flyHelp').hidden = opts.cam !== 'fly';
       b.blur(); // keep keyboard focus off the button so WASD and Space go to the view
     });
+    $('#wireSel').value = opts.wire;
+    $('#wireSel').onchange = (e) => { opts.wire = e.target.value; applyWire(); e.target.blur(); try { localStorage.setItem('btgWire', opts.wire); } catch {} };
     $('#transSel').value = opts.transparency;
-    $('#transSel').onchange = (e) => { opts.transparency = e.target.value; applyTransparency(current, opts.transparency); };
+    $('#transSel').onchange = (e) => {
+      opts.transparency = e.target.value;
+      const wire = opts.wire; opts.wire = 'off'; applyWire(); // apply to the textured materials, not the wireframe ones
+      applyTransparency(current, opts.transparency); opts.wire = wire; applyWire();
+    };
     if (clips.length) {
       $('#clipSel').onchange = (e) => playClip(+e.target.value);
       $('#playBtn').onclick = (e) => { opts.playing = !opts.playing; e.target.textContent = opts.playing ? 'Pause' : 'Play'; };
