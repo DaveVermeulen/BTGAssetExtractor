@@ -10,6 +10,7 @@ Reads the game's .vol/.avl archives (never writes to them) and writes:
   <out>/audio/<level>/sfx/*.wav       mono sound bank entries (Xbox IMA ADPCM -> 16-bit PCM)
   <out>/audio/<level>/music_and_speech/*.wav   stereo streams
   <out>/other/general/*               text/config files from general.vol
+  <out>/other/text/game_text.csv      every line of game text in six languages (also as .json)
   <out>/manifest.json                 every output with its source and duplicate locations
   <out>/texture_index.json            (wad, texture record offset) -> png, for binding textures to models
 
@@ -17,15 +18,15 @@ Formats (all little-endian):
   VOLT archive : "VOLT", u32 ver=2, u32 count, u32 recblock; count*{u32 hash,u32 1,u32 recoff};
                  records {u32 offset,u32 0,u32 size,u32 0,char name[] NUL}
   BIGB wad     : 0x180-byte header; 0x78 sfx bank size, 0x7C stream size, 0x80/0x84 unpacked
-                 sizes A/B, 0x88/0x8C packed sizes A/B; packed data follows the header.
+                 sizes A/B, 0x88/0x8C packed sizes A/B; packed data A then B starts at 0x190.
   Compression  : c<0x40 -> c+1 literals; 0x40..0x7F -> repeat next byte (c&0x3F)+2 times;
                  else big-endian int16 w=(c<<8|next): copy (w&15)+2 bytes from -(w>>4)+1 back.
-  Texture      : record [0x00545C6C][w][h][0][ptr][size]; ptr+8 is a whole TGA file.
+  Texture      : record [0x00545C6C][w][h][0][ptr][size]; ptr is a whole TGA file.
   Audio        : RIFF/WAVE (sfx) and RIFF/WAVS (stream) headers in the wad, chunks fmt/fact/
                  name/strm(offset,size). Data in <level>.PCA: sfx bank at 0, streams at
                  roundup(bank size, 0x800). Codec 0x69 Xbox IMA ADPCM, 36 bytes/64 samples/channel.
 """
-import sys, os, struct, re, io, hashlib, json, wave, zlib
+import sys, os, struct, re, io, hashlib, json, wave, zlib, csv
 
 # ---------------- VOLT archives ----------------
 def volt_list(path):
@@ -65,12 +66,45 @@ def argz(src, cap):
                     out.append(out[s + k] if s + k >= 0 else 0)
     return bytes(out[:cap])
 
+WAD_DATA = 0x190    # packed data starts after the build command line (0x90..0x190), not at the 0x180 header size
+
 def unwad(b):
-    if len(b) < 0x90 or b[:4] != b'BIGB': return None
-    hs = struct.unpack_from('<I', b, 4)[0]
+    if len(b) < WAD_DATA or b[:4] != b'BIGB': return None
     bank, streams, ua, ub, pa, pb = struct.unpack_from('<6I', b, 0x78)
     if not ua: return None
-    return argz(b[hs:hs + pa], ua), bank
+    return argz(b[WAD_DATA:WAD_DATA + pa], ua), bank
+
+def unwad_relocs(b):
+    """Offsets in the unpacked wad that hold pointers (section B, the relocation stream: u32 list where
+    a value with bit 31 set starts a group and the values after it are pointer offsets)."""
+    ua, ub, pa, pb = struct.unpack_from('<4I', b, 0x80)
+    if not ub: return set()
+    r = argz(b[WAD_DATA + pa:WAD_DATA + pa + pb], ub)
+    return {v for v in struct.unpack_from('<%dI' % (len(r) // 4), r) if not v & 0x80000000}
+
+# ---------------- game text ----------------
+LANGS = ('english', 'french', 'german', 'spanish', 'italian', 'danish')
+GLYPHS = {i: '[button %d]' % i for i in range(1, 0x1f)}   # controller-button icons drawn inline
+GLYPHS[0x1f] = '\n'                                       # line break
+
+def game_text(d, ptrs):
+    """Text records in an unpacked .PCS: 8 consecutive pointers, the first six to the same line in
+    English, French, German, Spanish, Italian and Danish (UTF-8, NUL-terminated), the last two 0.
+    Scripts point at the record. Yields the six strings with control codes made readable."""
+    def text(v):
+        e = d.find(b'\0', v, v + 4000)
+        if e < 0: return None
+        try: t = d[v:e].decode('utf8')
+        except UnicodeDecodeError: return None
+        if sum(ord(c) < 32 for c in t) > max(2, len(t) // 8): return None
+        return ''.join(GLYPHS.get(ord(c), c) if ord(c) < 32 else c for c in t)
+    for p in sorted(ptrs):
+        if p - 4 in ptrs or not all(p + 4 * k in ptrs for k in range(1, 6)) or p + 32 > len(d): continue
+        v = struct.unpack_from('<8I', d, p)
+        if v[6] or v[7] or max(v[:6]) >= len(d): continue
+        t = [text(x) for x in v[:6]]
+        if None in t or sum(bool(re.search('[A-Za-z]{2}', x)) for x in t) < 4: continue
+        yield t
 
 # ---------------- PNG writer ----------------
 def write_png(path, w, h, rows, channels):
@@ -234,7 +268,7 @@ def main(data, out, only=None):
     texdir = os.path.join(out, 'textures'); auddir = os.path.join(out, 'audio')
     os.makedirs(texdir, exist_ok=True); os.makedirs(auddir, exist_ok=True)
     man = {'textures': [], 'audio': [], 'other': [], 'failures': []}
-    tex_index = []; seen_tex = {}; seen_hdr = set(); seen_raw = {}; tex_count = {}
+    tex_index = []; seen_tex = {}; seen_hdr = set(); seen_raw = {}; tex_count = {}; texts = {}
     vols = sorted(f for f in os.listdir(data) if f.lower().endswith('.vol'))
     for vf in vols:
         lv = vf[:-4]
@@ -262,21 +296,25 @@ def main(data, out, only=None):
             r = unwad(b)
             if r is None: continue
             d, bank_size = r
+            for t in game_text(d, unwad_relocs(b)):
+                e = texts.setdefault(tuple(t), {'levels': [], 'sources': []})
+                if stem not in e['levels']: e['levels'].append(stem)
+                if vf + '/' + n not in e['sources']: e['sources'].append(vf + '/' + n)
             for m in re.finditer(re.escape(b'\x6c\x5c\x54\x00'), d):
                 T = m.start()
                 try:
                     w, h, z, ptr, tsz = struct.unpack_from('<5I', d, T + 4)
-                    t = d[ptr + 8:ptr + 8 + tsz]
+                    t = d[ptr:ptr + tsz]
                     if len(t) != tsz or tsz < 18 or struct.unpack_from('<HH', t, 12) != (w, h): continue
                     hsh = hashlib.sha1(t).hexdigest()[:12]
-                    rec = {'wad': vf + '/' + n, 'record_offset': T, 'image_offset': ptr + 8, 'width': w, 'height': h, 'sha1_12': hsh}
+                    rec = {'wad': vf + '/' + n, 'record_offset': T, 'image_offset': ptr, 'width': w, 'height': h, 'sha1_12': hsh}
                     tex_index.append(rec)
                     if hsh in seen_tex: seen_tex[hsh]['also_in'].append(vf + '/' + n); rec['png'] = seen_tex[hsh]['file']; continue
                     os.makedirs(os.path.join(texdir, stem), exist_ok=True)
                     i = tex_count.get(stem, 0); tex_count[stem] = i + 1
                     p = os.path.join(texdir, stem, '%s_%03d_%dx%d_%s.png' % (stem, i, w, h, hsh))
                     mode = tga_to_png(t, p)
-                    e = {'file': os.path.relpath(p, out), 'source': '%s/%s@0x%x' % (vf, n, ptr + 8), 'size': [w, h], 'mode': mode, 'level': stem, 'also_in': []}
+                    e = {'file': os.path.relpath(p, out), 'source': '%s/%s@0x%x' % (vf, n, ptr), 'size': [w, h], 'mode': mode, 'level': stem, 'also_in': []}
                     seen_tex[hsh] = e; man['textures'].append(e); rec['png'] = e['file']
                 except Exception as ex:
                     man['failures'].append({'source': '%s/%s@0x%x' % (vf, n, T), 'error': repr(ex)})
@@ -313,6 +351,14 @@ def main(data, out, only=None):
             print('%s %s: %d textures, %d sounds, %d failures so far' % (vf, n, len(man['textures']), len(man['audio']), len(man['failures'])), flush=True)
         fv.close()
         if fa: fa.close()
+    if texts:
+        td = os.path.join(out, 'other', 'text'); os.makedirs(td, exist_ok=True)
+        rows = [dict(zip(LANGS, t), levels=e['levels'], sources=e['sources']) for t, e in texts.items()]
+        with open(os.path.join(td, 'game_text.json'), 'w', encoding='utf-8') as f: json.dump(rows, f, indent=1, ensure_ascii=False)
+        with open(os.path.join(td, 'game_text.csv'), 'w', encoding='utf-8-sig', newline='') as f:
+            w = csv.writer(f); w.writerow(LANGS + ('levels',))
+            for r in rows: w.writerow([r[k] for k in LANGS] + [';'.join(r['levels'])])
+        man['other'].append('other/text/game_text.json (%d lines)' % len(rows))
     with open(os.path.join(out, 'manifest.json'), 'w') as f: json.dump(man, f, indent=1)
     with open(os.path.join(out, 'texture_index.json'), 'w') as f:
         json.dump({'note': 'Every texture record in every unpacked wad. record_offset = offset of the texture record '

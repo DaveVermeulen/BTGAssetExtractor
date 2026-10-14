@@ -15,7 +15,7 @@ Blender.
 | Tool | Output |
 |---|---|
 | `tools/bionicle_extract.py` | ~2,770 textures (PNG), ~680 sounds and music tracks (16-bit WAV), the plain-text config files, and a `manifest.json` |
-| `tools/btg_models.py` | Every level as one glTF in world space (63 levels), plus ~760 entity meshes (characters, Rahi, masks, props, skydomes) in bind pose, each written once for the whole game |
+| `tools/btg_models.py` | Every level as one glTF in world space (63 levels), plus ~760 entity meshes (characters, Rahi, masks, props, skydomes) in bind pose, each written once for the whole game, the collision meshes, and where every entity is placed in each level |
 | `tools/btg_rigged.py` | ~170 rigged characters (Toa, Toa Nuva, Matoran, Rahkshi, Bohrok, Rahi…), one file per body variant, with skeleton, skin weights and animation clips (rotation, translation and root motion) |
 
 Counts are from the retail PC release; your numbers may differ slightly by version.
@@ -67,9 +67,16 @@ output/
   audio/<level>/sfx/*.wav                mono sound effects and voice lines
   audio/<level>/music_and_speech/*.wav   stereo music, ambience and cutscene audio
   other/general/*                        text config files from general.vol (level list etc.)
+  other/text/game_text.csv               every line of game text in six languages (also game_text.json)
   manifest.json                          every output file, its source archive and offset, and duplicates
   texture_index.json                     maps texture records in the game files to PNG names
 ```
+
+`game_text.csv` has one row per line of text: menus, help and hint messages, objectives, Rahi
+descriptions and the credits, in English, French, German, Spanish, Italian and Danish, with the levels that
+use it (756 lines). Open it in a spreadsheet as UTF-8. Line breaks are kept, and the controller-button
+icons the game draws inline are written as `[button N]`. The game builds a few messages from two pieces,
+such as a free-space warning and the number of blocks it needs, so those appear as two rows.
 
 Identical textures and sounds appear in many levels. Each is written once, in the first level it
 was found in, and `also_in` in `manifest.json` lists the others. The game stores no texture names,
@@ -87,12 +94,30 @@ This writes:
 ```
 output/models/
   levels/<level>.gltf                  whole level geometry, e.g. 10-13.gltf is Ta-Koro
+  collision/<level>.gltf               the level's collision mesh, one material per surface type
   entities/<name>__<hash>.gltf         each entity mesh in bind pose, written once for the whole game
   entities.csv                         every entity file with the levels and source files that use it, and its near-duplicate group
+  placements/<level>.gltf              where every creature, pickup, prop, trigger and effect is placed (also as .json)
+  placements.csv                       every placement in every level
   index.csv                            which file inside the game archives produced what
 ```
 
 Each `.gltf` comes with a `.bin` and its PNG textures; keep them together.
+
+The collision meshes (63 levels) line up with the level geometry. They include the invisible walls that
+keep the player on the path, so some are much taller than the visible level. Each surface type the game
+uses gets its own material, named `surface_<number>` and coloured so the types are easy to tell apart.
+The numbers are the game's own surface codes. In Ta-Koro, for example, 5 is the lava and 3 the water.
+`index.csv` lists the triangle count per surface type.
+
+The placements (about 3,850 in 86 levels, menus and cutscene sets) come from each level's strat (entity script) table. Every placement is an empty node named
+`<index> <strat>`, such as `002 IrisDoor` or `024 Nui_Kopen_Mk2`, at the right position and rotation, so
+importing `placements/10-13.gltf` together with `levels/10-13.gltf` shows where everything sits in Ta-Koro.
+Strats that follow a route (moving platforms, canisters, camera shots, the skydome) get their waypoints as a
+line, and triggers get their box. A strat is the game's own name for a script, so the list also has
+invisible things like `SoundPlayer`, `Fog`, `LoadNextArea` and camera triggers. The node's extras and
+`placements.csv` list the meshes the strat's script refers to (`script_models`). That list is per script
+file, so strats that share a file share the list.
 
 ### 3. Rigged and animated characters
 
@@ -106,7 +131,14 @@ This writes:
 output/models/
   characters/<name>__<hash>.gltf       mesh + skeleton + skin weights + animation clips
   characters.csv                       source file, near-duplicate group and bone, clip and mesh counts per character
+  cameras/camera_<level>__<hash>.gltf  animated cutscene cameras, one animation per cutscene clip
+  cameras.csv                          source file, clip count and clip lengths per camera
 ```
+
+Cutscene characters and their cameras share one origin, so load a camera file into the same Blender scene
+as the characters and play the clip of the same length on each to watch the cutscene from the game's
+point of view. The game doesn't store the camera's field of view with the rig; the files use 46 degrees
+vertical (4:3), which frames the Ta-Koro cutscene as expected but may differ from the game's.
 
 A mesh that appears in several levels is exported once. Two copies count as the same when they draw the
 same triangles with the same vertex data and texture pixels (plus blend states for entities and bone
@@ -155,6 +187,10 @@ errors, so other glTF viewers work too.
 - [x] Entity meshes in bind pose (~760: characters, Rahi, masks, props, skydomes)
 - [x] Rigged characters with skeleton and skin weights (~170), alternate body variants split into separate files
 - [x] Near-duplicate characters and entity meshes grouped as versions of one model
+- [x] Cutscene cameras (25 rigs, 33 clips) as animated glTF cameras
+- [x] Game text: UI, help text, objectives, Rahi descriptions and credits in all six languages
+- [x] Collision meshes for each level (63), with surface types
+- [x] Level entity placement: every strat placed in every level, with paths and trigger boxes
 - [x] Animation clips with bone rotations and translations, including root motion
 - [x] Transparency and blend modes (alpha blend, additive glow, alpha test) on every glTF material
 - [x] Animated textures: every layer exported, with its scroll, rotation and blend op in the material extras
@@ -163,11 +199,7 @@ errors, so other glTF viewers work too.
 
 ### To do
 
-- [ ] **Cutscene cameras**: export the animated camera rigs that go with the cutscene clips
-- [ ] **Game text**: UI, help text, objectives and credits in all six languages
-- [ ] **Collision meshes** for each level
 - [ ] **Remaining skinned parts**: about a dozen rigid props (doors, iris panels, `Line10`, `little plank`, the closing-cutscene planets) that no skeleton fits yet; they are exported as static entities
-- [ ] **Level entity placement**: where each creature, pickup and prop sits in a level
 - [ ] **Level scripts, particles, fog and sky settings**
 
 Not possible: video, because the retail data has no Bink movies even though the game looks for `Movies\EA_Movie.bik`.

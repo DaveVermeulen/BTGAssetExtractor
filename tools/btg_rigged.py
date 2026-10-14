@@ -7,6 +7,8 @@ Needs: Python 3.8+, numpy, Pillow. Single-file bundle of btg_rigged.py + rig/*.p
 Reads the .vol archives read-only and writes, for every skinned entity:
   <out>/characters/<name>__<hash>.gltf   mesh + skeleton + per-vertex weights + animation clips
   <out>/characters.csv                   source file, bone/clip/mesh counts per output
+  <out>/cameras/camera_<level>__<hash>.gltf   cutscene camera, one animation per clip
+  <out>/cameras.csv                      source file and clip lengths per camera
 Animations carry bone rotations and translations, including root motion.
 """
 
@@ -812,6 +814,91 @@ def run(packs,outdir):
         with open(fn,'w') as fh: json.dump(gl,fh)
     return rows
 
+# ==== cameras.py ====
+
+def quat_xyzw(R):
+    """Rotation matrix (columns = local axes, column-vector convention) to a glTF quaternion."""
+    return [float(x) for x in mat2quat(R)]
+
+def camera_track(s,an,cam):
+    """World position and orientation of camera bone `cam` at every key of clip `an`, in glTF space.
+    Bone 0 (Scene Root) keeps its bind matrix, which swaps the rig's Z-up axes to the game's Y-up,
+    exactly as for characters. The camera looks down the bone's -X axis (its target bone sits at
+    -3 X) with the bone's +Y axis as up."""
+    n=len(s); S=np.diag([1.,1.,-1.]); pos=[]; rot=[]
+    chans=[(c,int(v)) for c,v in enumerate(an['channels'])]
+    for k in range(len(an['times'])):
+        L=[np.array(b['local']).reshape(4,4).copy() for b in s]
+        for c,v in chans:
+            b=v if v>=0 else -v-1
+            if b<=0 or b>=n: continue
+            x,y,z,w=an['quats'][k,c]/max(np.linalg.norm(an['quats'][k,c]),1e-9)
+            R=np.array([[1-2*(y*y+z*z),2*(x*y+z*w),2*(x*z-y*w)],[2*(x*y-z*w),1-2*(x*x+z*z),2*(y*z+x*w)],
+                        [2*(x*z+y*w),2*(y*z-x*w),1-2*(x*x+y*y)]])
+            L[b][:3,:3]=R*np.linalg.norm(L[b][:3,:3],axis=1)[:,None]
+            L[b][3,:3]=np.array(s[b]['local'][12:15])+an['trans'][k,c]
+        i=cam; chain=[]
+        while True:
+            chain.append(i); p=s[i]['parent']
+            if i==0 or p>=n or p==i: break
+            i=p
+        W=np.eye(4)
+        for i in chain: W=W@L[i]          # row vectors: local @ parent @ ... @ root
+        ax=W[:3,:3]/np.linalg.norm(W[:3,:3],axis=1)[:,None]
+        fwd=-ax[0]@S; up=ax[1]@S
+        back=-fwd/np.linalg.norm(fwd); right=np.cross(up,back); right/=np.linalg.norm(right); up=np.cross(back,right)
+        pos.append(W[3,:3]@S); rot.append(quat_xyzw(np.stack([right,up,back],1)))
+    rot=np.array(rot)
+    for k in range(1,len(rot)):           # keep hemisphere continuity for interpolation
+        if np.dot(rot[k],rot[k-1])<0: rot[k]*=-1
+    return np.array(pos,np.float32),rot.astype(np.float32)
+
+def export_cameras(packs,outdir,yfov=0.8):  # 0.8 rad = 46 degrees
+    """Cutscene camera rigs (skeletons with Cam_joint1 / camTarget_Joint and no mesh) to glTF
+    cameras: one file per unique rig and clip set, each clip an animation of the camera node.
+    The field of view is not stored with the rig; `yfov` (radians) is a stand-in."""
+    os.makedirs(outdir,exist_ok=True); seen={}; rows=[]
+    for base,m,rel in packs:
+        level=base.split('_')[-1].split('.')[0]
+        for h,s in find_skeletons(m).items():
+            names=[b['name'] for b in s]
+            if 'Cam_joint1' not in names or 'camTarget_Joint' not in names: continue
+            anims=sorted(find_anims(m,h),key=lambda a:(len(a['name']),a['name'],a['id']))
+            if not anims: continue
+            key=hashlib.md5(repr(skel_key(s)).encode()+''.join(anim_hash(a) for a in anims).encode()).hexdigest()
+            durs=[round(float(a['times'][-1]),2) for a in anims]
+            if key in seen:
+                seen[key]['levels'].append(level); seen[key]['sources'].append(base)
+                rows.append(dict(source=base,output=seen[key]['output'],clips=len(anims),seconds=';'.join(map(str,durs)))); continue
+            fn='camera_%s__%s'%(level,key[:6])
+            gl=dict(asset=dict(version='2.0',generator='bionicle-extract'),scene=0,scenes=[dict(nodes=[0])],
+                    cameras=[dict(type='perspective',name='cutscene',perspective=dict(yfov=yfov,aspectRatio=4/3,znear=0.1,zfar=5000.0))],
+                    nodes=[dict(name='Cam_joint1',camera=0)],accessors=[],bufferViews=[],animations=[])
+            buf=bytearray()
+            def acc(a,typ,minmax=False):
+                a=np.ascontiguousarray(a,dtype='<f4')
+                while len(buf)%4: buf.append(0)
+                gl['bufferViews'].append(dict(buffer=0,byteOffset=len(buf),byteLength=a.nbytes)); buf.extend(a.tobytes())
+                d=dict(bufferView=len(gl['bufferViews'])-1,componentType=5126,count=len(a),type=typ)
+                if minmax: d['min']=[float(x) for x in a.reshape(len(a),-1).min(0)]; d['max']=[float(x) for x in a.reshape(len(a),-1).max(0)]
+                gl['accessors'].append(d); return len(gl['accessors'])-1
+            for a in anims:
+                pos,rot=camera_track(s,a,names.index('Cam_joint1'))
+                if not len(gl['animations']): gl['nodes'][0].update(translation=pos[0].tolist(),rotation=rot[0].tolist())
+                t=acc(a['times'].reshape(-1,1),'SCALAR',True)
+                gl['animations'].append(dict(name='anim_'+(a['name'] or '%x'%a['id']),
+                    samplers=[dict(input=t,output=acc(pos,'VEC3'),interpolation='LINEAR'),dict(input=t,output=acc(rot,'VEC4'),interpolation='LINEAR')],
+                    channels=[dict(sampler=0,target=dict(node=0,path='translation')),dict(sampler=1,target=dict(node=0,path='rotation'))]))
+            open(os.path.join(outdir,fn+'.bin'),'wb').write(buf)
+            gl['buffers']=[dict(uri=fn+'.bin',byteLength=len(buf))]
+            info=dict(output='cameras/%s.gltf'%fn,levels=[level],sources=[base],gl=gl,path=os.path.join(outdir,fn+'.gltf'),seconds=durs)
+            seen[key]=info
+            rows.append(dict(source=base,output=info['output'],clips=len(anims),seconds=';'.join(map(str,durs))))
+    for info in seen.values():
+        gl=info['gl']; gl['asset']['extras']=dict(btg=dict(levels=info['levels'],sources=info['sources'],clip_seconds=info['seconds']))
+        json.dump(gl,open(info['path'],'w'))
+    return rows
+
 # ==== main ====
 
 import sys,os,glob,csv
@@ -829,7 +916,12 @@ def packs(data):
 def main():
     if len(sys.argv)!=3: print(__doc__); sys.exit(1)
     data,out=sys.argv[1],sys.argv[2]
-    rows=run(packs(data),os.path.join(out,'characters'))
+    P=list(packs(data))
+    crows=export_cameras(P,os.path.join(out,'cameras'))
+    with open(os.path.join(out,'cameras.csv'),'w',newline='') as fh:
+        w=csv.DictWriter(fh,fieldnames=['source','output','clips','seconds']); w.writeheader(); [w.writerow(r) for r in crows]
+    print('cameras:',len({r['output'] for r in crows}),'files')
+    rows=run(P,os.path.join(out,'characters'))
     keys=['source','kind','name','output','group','group_size','body','body_size','bones','anims','meshes','nodes','batches','verts','tris','textures']
     with open(os.path.join(out,'characters.csv'),'w',newline='') as fh:
         w=csv.DictWriter(fh,fieldnames=keys,extrasaction='ignore'); w.writeheader(); [w.writerow(r) for r in rows]

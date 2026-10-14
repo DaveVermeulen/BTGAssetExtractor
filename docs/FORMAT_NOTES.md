@@ -106,9 +106,29 @@ the skeleton header). Clip header (all offsets from the clip start, pointers int
 The exporter writes a translation track for every bone that any clip of that skeleton moves, in every
 clip (unmoved bones get their bind translation), so switching clips in Blender never leaves a bone offset.
 
+## Cutscene cameras
+A cutscene camera is a mesh-less skeleton in the `.PCS`: `Scene Root`, `Cam_joint1`, `camTarget_Joint`
+(child of the camera at -3 X), `camTarget_Joint2`, `Cam_joint2` (+2 X) and a `Box01` marker
+(75-53 adds a `Cam_Move` parent and a `Camera01` bone). Its clips use the normal animation format;
+`Cam_joint1` carries all of the movement (rotation and translation), and `camTarget_Joint2` has a constant
+rotation. The camera looks down the bone's -X axis with its +Y axis as up, and like every skeleton the
+rig is authored Z-up under a `Scene Root` whose bind matrix swaps Y and Z. Clip lengths match the
+cutscene clips of the characters in the same pack (10-21: 25.0 s and 10.21 s), and both are animated
+around the same origin. No field of view was found in the rig. 25 distinct rigs carry 33 clips; 53-39
+also has a 650 s `playerPosition` / `camPosition` spline rig, which is not a cutscene camera and is not exported.
+
 ## Textures inside the wads (used by `bionicle_extract.py`)
 Each texture record in the unpacked main block is `[0x00545C6C][u32 w][u32 h][0][u32 ptr][u32 size]`;
-`ptr + 8` holds a complete TGA file.
+`ptr` holds a complete TGA file. (Before 2026-10-14 `bionicle_extract.py` unpacked from 0x180 instead of
+0x190, which put 8 stray bytes in front of the block, so its offsets were 8 too high and it read `ptr + 8`.)
+
+## Game text
+Text lives in the `.PCS` wads (none in `.PCM`), as UTF-8 NUL-terminated strings with a record of 8
+relocated pointers per line: English, French, German, Spanish, Italian, Danish, then two zero slots.
+Strat script bytecode points at the record (opcode word `0x115a` followed by the record address), so lines
+have no names. Control bytes: `0x1F` is a line break and `0x01`-`0x12` are controller-button icons
+(`0x01` accept, `0x02`/`0x03` back or cancel, `0x05`/`0x06` and `0x07`/`0x08` direction pairs, `0x12`
+centre screen). There are 756 distinct lines; PS2 memory-card and Xbox messages are still in the PC data.
 
 ## Audio (`.PCA` in the `.avl` archives)
 The `.PCS`/`.PCSI` wads hold `RIFF/WAVE` (sound effect) and `RIFF/WAVS` (stream) headers with
@@ -160,5 +180,38 @@ rotate, and its texture address mode U/V from the batch sampler list (`+0x2C`, r
 1 wrap, 2 mirror, 3 clamp), is listed in `material.extras.btg.layers`. A rotating layer is often followed by a
 static MODULATE layer that masks the wrapped corners.
 
+## Collision meshes (start of `.PCM`, relocation type 0x10B)
+```
+0x00 u32 size, u32 count, u32 0, f32 centre[3], f32 radius^2, f32 radius     (bounding sphere)
+0x20 u32 offset (0x30), u32 recordCount, u32 count, u32 0
+0x30 recordCount x { f32 x, y, z, u32 code }
+```
+The records are a PS2-style triangle-strip stream in level world space. Bit 7 (0x80) of `code` adds the
+vertex to the strip, bit 6 (0x40) also draws a triangle with the two vertices before it, bit 8 (0x100)
+flips that triangle's winding, and a record without bit 7 (all zero) ends the strip. The top 16 bits are
+the surface type (in Ta-Koro 1 rock, 3 water, 5 lava, 9 the arena rim; Ko-Koro uses 100-107 and 359/361).
+Bits 0, 2 and 4 are set on some vertices and are not decoded. 63 levels have collision. The other
+38 `.PCM` files (every `xx-00`, most `75-xx`, `78-00`, `53-39`, `9-96` to `9-99`) have none.
+
+## Strat table and placements (`.PCS`, relocation type 0x10E)
+The 0x10E object is the strat table. From `+0x10`:
+```
+ptr code, ptr classRecords, 0, u32 codeSize, u32 classCount, 0, ptr placements, ptr end, u16 placementCount, u16 ?
+```
+followed by the strat names. The bytecode pointers are relocation type 0x117 (one group for the whole file).
+A class record starts with `ptr strat table, ptr name, ptr entry, ptr entry` and then event handler tables.
+Each placement is 0x3C bytes, in level world space:
+```
+0x00 f32 quaternion x, y, z, w     0x10 f32 position[3]     0x1C u32 0
+0x20 f32 yaw (4096 = full turn, 2048 = none; same rotation as the quaternion)    0x24 u32 0
+0x28 ptr class   0x2C ptr params   0x30 ptr path (or 0)   0x34 ptr area (or 0)   0x38 u32 index
+```
+A path is a doubly linked list of 0x40-byte waypoints (`ptr prev, ptr next, f32 xyz, ...`). An area is a
+0x20-byte box (`u32, ptr, f32 min[3], f32 max[3]`). The quaternion is used as-is with the Z mirror
+(glTF rotation `-x, -y, z, w`); checked with the Ta-Koro iris doors, whose panels then sit in their frames.
+Scripts refer to meshes through 0x10-byte model handles (`ptr node, ptr collision`), where the collision
+object (type 0x10A) uses the same record format as the level collision. The parameter block layout
+differs per strat and is not decoded. `.PCSI` files hold the same placements as the `.PCS`.
+
 ## Not decoded yet
-Collision meshes (start of .PCM).
+Level scripts (the strat bytecode), particles, fog and sky settings.

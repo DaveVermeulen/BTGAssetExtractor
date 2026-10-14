@@ -7,12 +7,16 @@ Needs: Python 3.8+, numpy, Pillow  (pip install numpy pillow)
 Reads the .vol archives read-only, decompresses the BIGB level/entity files
 (.PCM = level, .PCS/.PCSI = entities), and writes glTF 2.0 (.gltf + .bin + PNG textures):
   <out>/levels/<level>.gltf      whole level geometry, world space
+  <out>/collision/<level>.gltf   the level's collision mesh, one material per surface type
   <out>/entities/<name>__<hash>.gltf   each entity mesh in bind pose, written once per game
   <out>/entities.csv             every unique entity mesh with the levels/sources that use it
+  <out>/placements/<level>.gltf  where each strat (creature, pickup, prop, trigger, effect) is placed,
+                                 as named empty nodes plus waypoint paths and trigger boxes (and .json)
+  <out>/placements.csv           every placement in every level
   <out>/index.csv                which source file produced what
 Format notes are in FORMAT_NOTES.md next to this script.
 """
-import sys,os,glob,json,hashlib,re,collections,csv,struct,io
+import sys,os,glob,json,hashlib,re,collections,csv,struct,io,bisect
 import numpy as np
 from PIL import Image
 
@@ -300,6 +304,140 @@ def write_gltf(P,groups,outdir,name,texcache=None):
     return stats
 
 
+def collision(m):
+    """Level collision mesh at the start of a .PCM (relocation type 0x10B): u32 size, u32 count,
+    0, f32 centre[3], f32 radius^2, f32 radius; at 0x20 u32 offset (0x30), u32 record count, u32 count, 0.
+    Records are 16 bytes, f32 x, y, z, u32 code, laid out as PS2-style triangle strips: bit 7 (0x80)
+    adds the vertex to the strip, bit 6 (0x40) also draws a triangle with the two before it, bit 8
+    (0x100) flips its winding, the top 16 bits are the surface type, and a record without bit 7 ends
+    the strip. Returns (vertices, triangles, surface per triangle) or None."""
+    if len(m)<0x40: return None
+    cnt=u32(m,4); off,n,n1=struct.unpack_from('<3I',m,0x20)
+    if off!=0x30 or n1!=cnt or not 0<n<=(len(m)-off)//16: return None
+    A=np.frombuffer(m,dtype='<u4',count=n*4,offset=off).reshape(n,4)
+    V=A[:,:3].copy().view('<f4'); code=A[:,3].tolist()
+    tris=[]; surf=[]; a=b=None
+    for i,k in enumerate(code):
+        if not k&0x80: a=b=None; continue
+        if k&0x40 and b is not None and a is not None:
+            tris.append((b,a,i) if k&0x100 else (a,b,i)); surf.append(k>>16)
+        a,b=b,i
+    if not tris: return None
+    return V,np.array(tris,np.int64),np.array(surf)
+
+def write_collision(m,outdir,name):
+    """One glTF per level with a primitive (and material surface_<type>) per surface type."""
+    c=collision(m)
+    if c is None: return None
+    V,T,S=c; os.makedirs(outdir,exist_ok=True)
+    used,inv=np.unique(T,return_inverse=True); P=V[used].astype('<f4').copy(); P[:,2]*=-1
+    I=inv.reshape(-1,3)[:,[0,2,1]].astype('<u4')   # flip winding for the Z mirror
+    gl=dict(asset=dict(version='2.0',generator='bionicle-extract'),scene=0,scenes=[dict(nodes=[0])],
+            nodes=[dict(name=name+'_collision',mesh=0)],meshes=[dict(name=name+'_collision',primitives=[])],
+            materials=[],accessors=[],bufferViews=[])
+    buf=bytearray()
+    def acc(a,ct,typ,tgt,count,minmax=False):
+        while len(buf)%4: buf.append(0)
+        gl['bufferViews'].append(dict(buffer=0,byteOffset=len(buf),byteLength=a.nbytes,target=tgt)); buf.extend(a.tobytes())
+        d=dict(bufferView=len(gl['bufferViews'])-1,componentType=ct,count=count,type=typ)
+        if minmax: d['min']=[float(x) for x in a.min(0)]; d['max']=[float(x) for x in a.max(0)]
+        gl['accessors'].append(d); return len(gl['accessors'])-1
+    pa=acc(P,5126,'VEC3',34962,len(P),True); counts={}
+    for st in sorted(set(S.tolist())):
+        h=hashlib.md5(b'%d'%st).digest()   # a stable colour per surface type
+        gl['materials'].append(dict(name='surface_%d'%st,doubleSided=True,extras=dict(btg=dict(surface=st)),
+            pbrMetallicRoughness=dict(baseColorFactor=[0.25+h[0]/340,0.25+h[1]/340,0.25+h[2]/340,1.0],metallicFactor=0.0,roughnessFactor=1.0)))
+        ix=np.ascontiguousarray(I[S==st]).reshape(-1); counts[st]=len(ix)//3
+        gl['meshes'][0]['primitives'].append(dict(attributes=dict(POSITION=pa),indices=acc(ix,5125,'SCALAR',34963,len(ix)),material=len(gl['materials'])-1))
+    open(os.path.join(outdir,name+'.bin'),'wb').write(buf)
+    gl['buffers']=[dict(uri=name+'.bin',byteLength=len(buf))]
+    json.dump(gl,open(os.path.join(outdir,name+'.gltf'),'w'))
+    return dict(tris=len(T),verts=len(P),surfaces=';'.join('%d:%d'%kv for kv in counts.items()))
+
+def placements(P,nodes):
+    """Strat (entity script) placements in a .PCS. The 0x10E object is the strat table; at +0x10:
+    ptr code, ptr class records, 0, code size, class count, 0, ptr placements, ptr end, u16 placement
+    count. Each placement is 0x3C bytes: f32 quaternion x, y, z, w, f32 position[3], 0, f32 yaw
+    (4096 = full turn, 2048 = none), 0, ptr class, ptr params, ptr path, ptr area, u32 index.
+    A class record starts with ptr strat table, ptr name, ptr code entry points. A path is a linked
+    list of 0x40-byte waypoints (ptr prev, ptr next, f32 xyz), an area a 0x20-byte box
+    (u32, ptr, f32 min[3], f32 max[3]). nodes maps draw-node offsets to output names; models a class's
+    script file refers to are listed as script_models. Coordinates are game (D3D) world space."""
+    m=P.m; T=[ps for t,ps in P.O if t==0x10E and ps]
+    if not T: return []
+    hdr=T[0][0]; code,clsp,_,_,ncls,_,pl,pe,cnt=struct.unpack_from('<9I',m,hdr+0x10); cnt&=0xFFFF
+    R=set(x for t,ps in P.O for x in ps[1:])
+    if not (hdr<code<=clsp<=pl<pe<=len(m)) or pl+cnt*0x3C>pe: return []
+    def cs(o): return cstr(m,o,64) if 0<o<len(m) else ''
+    # class records and the models their script code points at (via a model handle: ptr node, ptr collision)
+    cls=[o for o in range(clsp,pl,4) if o in R and u32(m,o)==hdr and o+4 in R]
+    entry={c:min([u32(m,c+k) for k in (8,12) if c+k in R and code<=u32(m,c+k)<clsp] or [0]) for c in cls}
+    starts=sorted(set(v for v in entry.values() if v)); cptr=sorted(o for o in R if code<=o<clsp)
+    models={}
+    for c in cls:
+        s=entry[c]; ms=set()
+        if s:
+            i=bisect.bisect_right(starts,s); e=starts[i] if i<len(starts) else clsp
+            for o in cptr[bisect.bisect_left(cptr,s):bisect.bisect_left(cptr,e)]:
+                v=u32(m,o)
+                if v in R and u32(m,v) in nodes: ms.add(nodes[u32(m,v)])
+        models[c]=sorted(ms)
+    out=[]
+    for i in range(cnt):
+        o=pl+i*0x3C
+        q=struct.unpack_from('<4f',m,o); pos=struct.unpack_from('<3f',m,o+16); yaw=struct.unpack_from('<f',m,o+32)[0]
+        c,par,path,area,idx=struct.unpack_from('<5I',m,o+40)
+        d=dict(index=idx,cls=cs(u32(m,c+4)) if o+40 in R else '',position=[round(x,4) for x in pos],
+               quaternion=[round(x,6) for x in q],yaw_deg=round((yaw-2048)*360/4096,2),script_models=models.get(c,[]))
+        if o+48 in R:
+            pts=[]; w=path; seen=set()
+            while w and w not in seen and w+0x14<=len(m):
+                seen.add(w); pts.append([round(x,4) for x in struct.unpack_from('<3f',m,w+8)])
+                w=u32(m,w+4) if w+4 in R else 0
+            d['path']=pts
+        if o+52 in R:
+            b=struct.unpack_from('<6f',m,area+8); d['area']=dict(min=[round(x,4) for x in b[:3]],max=[round(x,4) for x in b[3:]])
+        out.append(d)
+    return out
+
+def write_placements(pl,outdir,name):
+    """placements/<level>.json, and a glTF of empty nodes (one per placement, named
+    '<index> <class>') with waypoint paths as line strips and areas as boxes."""
+    os.makedirs(outdir,exist_ok=True)
+    json.dump(pl,open(os.path.join(outdir,name+'.json'),'w'),indent=1)
+    gl=dict(asset=dict(version='2.0',generator='bionicle-extract'),scene=0,scenes=[dict(nodes=[])],
+            nodes=[],meshes=[],accessors=[],bufferViews=[],
+            materials=[dict(name='path',pbrMetallicRoughness=dict(baseColorFactor=[1,0.8,0.1,1])),
+                       dict(name='area',pbrMetallicRoughness=dict(baseColorFactor=[0.2,0.6,1,1]))])
+    buf=bytearray()
+    def acc(a,ct,typ,tgt,minmax=False):
+        while len(buf)%4: buf.append(0)
+        gl['bufferViews'].append(dict(buffer=0,byteOffset=len(buf),byteLength=a.nbytes,target=tgt)); buf.extend(a.tobytes())
+        d=dict(bufferView=len(gl['bufferViews'])-1,componentType=ct,count=len(a),type=typ)
+        if minmax: d['min']=[float(x) for x in a.min(0)]; d['max']=[float(x) for x in a.max(0)]
+        gl['accessors'].append(d); return len(gl['accessors'])-1
+    def lines(nm,P,ix,mode,mat):
+        P=np.array(P,'<f4'); P[:,2]*=-1
+        gl['meshes'].append(dict(name=nm,primitives=[dict(attributes=dict(POSITION=acc(P,5126,'VEC3',34962,True)),
+            indices=acc(np.array(ix,'<u2'),5123,'SCALAR',34963),mode=mode,material=mat)]))
+        gl['nodes'].append(dict(name=nm,mesh=len(gl['meshes'])-1)); gl['scenes'][0]['nodes'].append(len(gl['nodes'])-1)
+    for d in pl:
+        x,y,z,w=d['quaternion']; n=(x*x+y*y+z*z+w*w)**0.5 or 1
+        nm='%03d %s'%(d['index'],d['cls'])
+        gl['nodes'].append(dict(name=nm,translation=[d['position'][0],d['position'][1],-d['position'][2]],
+            rotation=[-x/n,-y/n,z/n,w/n],extras=dict(btg={k:v for k,v in d.items() if k not in ('position','quaternion')})))
+        gl['scenes'][0]['nodes'].append(len(gl['nodes'])-1)
+        if len(d.get('path',[]))>1: lines(nm+' path',d['path'],list(range(len(d['path']))),3,0)
+        if 'area' in d:
+            a,b=d['area']['min'],d['area']['max']
+            P=[[(a,b)[i&1][0],(a,b)[i>>1&1][1],(a,b)[i>>2&1][2]] for i in range(8)]
+            lines(nm+' area',P,[0,1,2,3,4,5,6,7,0,2,1,3,4,6,5,7,0,4,1,5,2,6,3,7],1,1)
+    if buf:
+        open(os.path.join(outdir,name+'.bin'),'wb').write(buf); gl['buffers']=[dict(uri=name+'.bin',byteLength=len(buf))]
+    else:
+        for k in ('meshes','accessors','bufferViews'): gl.pop(k)
+    json.dump(gl,open(os.path.join(outdir,name+'.gltf'),'w'))
+
 def volt_parse(path):
     d=open(path,'rb').read(1<<20)
     assert d[:4]==b'VOLT', path
@@ -491,9 +629,9 @@ def main():
     global DATA
     if len(sys.argv)!=3: print(__doc__); sys.exit(1)
     DATA,OUT=sys.argv[1],sys.argv[2]
-    lv=os.path.join(OUT,'levels'); lib=os.path.join(OUT,'entities')
+    lv=os.path.join(OUT,'levels'); lib=os.path.join(OUT,'entities'); col=os.path.join(OUT,'collision')
     os.makedirs(lv,exist_ok=True); os.makedirs(lib,exist_ok=True)
-    rows=[]; seen={}; libtex={}; verts={}
+    rows=[]; seen={}; libtex={}; verts={}; placed=set(); prow=[]
     def safe(s): return re.sub(r'[^A-Za-z0-9._-]+','_',s).strip('_') or 'unnamed'
     for base,main,rel in packs(DATA):
         stem,ext=base.split('.')
@@ -503,23 +641,38 @@ def main():
         if ext=='PCM':
             st=write_gltf(P,[(nm,b) for (n,nm),b in g.items()],lv,stem)
             rows.append(dict(source=base,kind='level',output='levels/%s.gltf'%stem,**(st or {})))
+            st=write_collision(main,col,stem)
+            if st: rows.append(dict(source=base,kind='collision',output='collision/%s.gltf'%stem,**st))
         else:
-            tc={}; th={}; th_col={}
+            tc={}; th={}; th_col={}; nodeout={}
             for (n,nm),b in g.items():
                 key=mesh_key(P,b,th)
                 if key in seen:
+                    nodeout[n]=seen[key]
                     rows.append(dict(source=base,kind='entity(dup)',name=nm,output=seen[key])); continue
                 fn='%s__%s'%(safe(nm),key[:6])
                 st=write_gltf(P,[(nm,b)],lib,fn,tc)
                 if st is None: continue
                 seen[key]='entities/%s.gltf'%fn; verts[seen[key]]=(mesh_verts(P,b),tex_colour(P,[bt['tex'] for bt in b],th_col))
-                rows.append(dict(source=base,kind='entity',name=nm,output=seen[key],**st))
+                rows.append(dict(source=base,kind='entity',name=nm,output=seen[key],**st)); nodeout[n]=seen[key]
+            if stem not in placed:
+                pl=placements(P,nodeout)
+                if pl:
+                    placed.add(stem); write_placements(pl,os.path.join(OUT,'placements'),stem)
+                    rows.append(dict(source=base,kind='placements',output='placements/%s.gltf'%stem,nodes=len(pl)))
+                    for d in pl: prow.append(dict(source=base,level=stem,index=d['index'],strat=d['cls'],
+                        x=d['position'][0],y=d['position'][1],z=d['position'][2],yaw_deg=d['yaw_deg'],
+                        path_points=len(d.get('path',[])),area='area' in d,script_models=';'.join(d['script_models'])))
         print(base,flush=True)
     for r in rows: r['title']=TITLES.get(r['source'],'')
-    keys=['source','title','kind','name','output','nodes','batches','verts','tris','textures']
+    keys=['source','title','kind','name','output','nodes','batches','verts','tris','textures','surfaces']
     with open(os.path.join(OUT,'index.csv'),'w',newline='') as fh:
         w=csv.DictWriter(fh,fieldnames=keys,extrasaction='ignore'); w.writeheader(); [w.writerow(r) for r in rows]
     write_usage(OUT,rows,verts)
+    if prow:
+        for r in prow: r['title']=TITLES.get(r['level']+'.PCM','')
+        with open(os.path.join(OUT,'placements.csv'),'w',newline='') as fh:
+            w=csv.DictWriter(fh,fieldnames=list(prow[0])); w.writeheader(); w.writerows(prow)
     print('DONE')
 
 if __name__=='__main__':
