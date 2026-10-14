@@ -86,7 +86,10 @@ def blend_state(m,b):
     """Render states of a draw batch: +0x1C count, +0x20 ptr to (D3DRENDERSTATETYPE, value) pairs.
     27 ALPHABLENDENABLE, 19 SRCBLEND, 20 DESTBLEND, 15 ALPHATESTENABLE, 14 ZWRITEENABLE.
     Blend factors without an explicit ALPHABLENDENABLE=0 mean blending is on. +0x14 is the
-    material colour (ARGB); its alpha is the batch opacity."""
+    material colour (ARGB); its alpha is the batch opacity.
+    +0x40 is a flag word: 0x400 (or 0x800) makes the game draw the batch with alpha test on
+    (ALPHAREF 0xC0, or 0xFE) and then again without depth writes for the soft edges
+    (BIONICLE.exe @0x449766), so a batch with no blend states of its own is a cutout."""
     cnt,p=struct.unpack_from('<2I',m,b+0x1c)
     rs={}
     if 0<cnt<64 and p+8*cnt<=len(m):
@@ -95,6 +98,7 @@ def blend_state(m,b):
     if rs.get(15)==1: mode='cutout'
     elif rs.get(27)==1 or (rs.get(27)!=0 and (19 in rs or 20 in rs)):
         mode=BLEND_NAMES.get((src,dst),'alpha' if dst!=2 else 'additive')
+    elif u32(m,b+0x40)&0xc00: mode='cutout'
     else: mode='opaque'
     alpha=(u32(m,b+0x14)>>24)/255.0 if mode in('alpha','additive') else 1.0
     return (mode,rs.get(14,1)!=0,src,dst,round(alpha,4))
